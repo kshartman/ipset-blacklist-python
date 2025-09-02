@@ -1,0 +1,282 @@
+.\" update_blacklist.8 - man page for Python ipset-blacklist
+.TH UPDATE_BLACKLIST 8 "September 2024" "update_blacklist.py" "System Administration Utilities"
+.SH NAME
+update_blacklist \- fetch, optimize, analyze, and apply IP blocklists to ipset/iptables
+.SH SYNOPSIS
+.B update_blacklist.py
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B update_blacklist.py
+is a Python reimplementation and enhancement of the original trick77/ipset-blacklist
+shell script. It fetches one or more IP blocklists, normalizes them, removes duplicates
+and subnets covered by broader prefixes, and generates an \fBipset restore\fR script. With
+.BR \-\-apply ,
+it atomically swaps the new sets into the kernel and ensures firewall rules exist.
+.PP
+It also supports an analysis mode (via
+.BR \-\-analyze )
+to process existing \fIipset save\fR dumps or restore files, reporting exact duplicates,
+covered subnets, and optionally emitting a clean CIDR list.
+.PP
+The script understands the original
+.I /etc/ipset-blacklist/ipset-blacklist.conf
+format, including
+.BR BLACKLISTS ,
+.BR MAXELEM ,
+.BR HASHSIZE ,
+.BR TIMEOUT ,
+.BR IPSET_BLACKLIST_NAME ,
+and
+.BR IP_BLACKLIST_RESTORE .
+IPv4 and IPv6 sets are maintained separately; IPv6 is skipped if there are no v6 entries
+(or when \fB\-\-ipv4\-only\fR is used).
+.SH OPTIONS
+.TP
+.BR \-\-conf " " \fIFILE\fR
+Path to configuration file (default: /etc/ipset-blacklist/ipset-blacklist.conf).
+.TP
+.BR \-\-out " " \fIFILE\fR
+Write the generated ipset restore script to FILE. Defaults to
+IP_BLACKLIST_RESTORE from conf or
+.IR /etc/ipset-blacklist/ip-blacklist.restore .
+.TP
+.BR \-\-apply
+Apply the generated blacklist directly to the kernel via \fBipset restore\fR using
+temporary sets and \fBswap\fR for atomic update. Also ensures iptables/ip6tables rules exist.
+.TP
+.BR \-\-iptables\-pos " " \fINUM\fR
+Insert iptables/ip6tables rules at position NUM (default 1, or
+IPTABLES_IPSET_RULE_NUMBER in the conf).
+.TP
+.BR \-\-collapse
+Collapse adjacent or overlapping networks after optimization (smaller output, slightly more CPU).
+.TP
+.BR \-\-progress
+Show progress output to stderr during fetch and optimization.
+.TP
+.BR \-\-progress\-interval " " \fIPERCENT\fR
+Update progress every N percent (default 0.5, minimum 5% to prevent SSH flooding).
+.TP
+.BR \-\-dry\-run
+Simulate all actions without making changes to the system. Implies \-\-no\-write unless \-\-apply is also specified.
+.TP
+.BR \-\-no\-filter\-private
+Do not filter private/reserved IP ranges (RFC 1918, loopback, multicast, etc). By default, these are filtered.
+.TP
+.BR \-\-force
+Create ipsets and iptables rules if they don't exist (equivalent to FORCE=yes in shell script).
+.TP
+.BR \-\-verbose ", " \-v
+Enable verbose logging output.
+.TP
+.BR \-\-quiet ", " \-q
+Suppress non-error output.
+.TP
+.BR \-\-show\-removed
+Print a report of exact duplicates and covered subnets removed during optimization to stderr.
+.TP
+.BR \-\-extra\-source " " \fIURL|FILE\fR
+Append an additional source URL or file to the blocklist list. May be specified multiple times.
+.TP
+.BR \-\-no\-write
+Do not write a restore file (useful with \-\-apply).
+.TP
+.BR \-\-ipv4\-only
+Ignore IPv6 entirely (no v6 sets/rules are written or applied).
+.TP
+.BR \-\-ipv6\-only
+Ignore IPv4 entirely.
+.TP
+.BR \-\-analyze " " \fIFILE\fR
+Analyze an \fIipset save\fR dump or an ipset restore file. Parses all
+.B add
+lines (optionally filtered by \fB\-\-set\fR), runs the optimizer, and reports
+totals (total adds, unique adds, removed exact duplicates, removed covered subnets).
+With \fB\-\-format cidr\fR, emits the optimized CIDR list to stdout.
+.TP
+.BR \-\-set " " \fINAME\fR
+(Repeatable) When using \fB\-\-analyze\fR, limit analysis to the given set name
+(e.g., \fBblacklist\fR, \fBblacklist6\fR). If omitted, all add lines are considered.
+.TP
+.BR \-\-format " " \fIadd|cidr\fR
+Output format when emitting lists (for \-\-analyze or normal emit). \fBcidr\fR prints just
+networks/hosts; \fBadd\fR prints "add <cidr>" lines (no set name).
+.TP
+.BR \-h ", " \-\-help
+Show help summary.
+.SH CONFIGURATION
+The configuration file is a shell-style file supporting these variables:
+.TP
+.B BLACKLISTS
+Array of URLs or file paths containing IP addresses and CIDR ranges (comments allowed after entries).
+.TP
+.B IPSET_BLACKLIST_NAME
+Base name of the blacklist set. IPv4 set uses this name; IPv6 set defaults to "<name>6".
+.TP
+.B IP_BLACKLIST_RESTORE
+Path to the ipset restore file to generate.
+.TP
+.B MAXELEM
+Maximum number of elements in each set (default 800000, or from conf).
+.TP
+.B HASHSIZE
+Hash size for ipset (default 16384).
+.TP
+.B TIMEOUT
+Timeout for HTTP requests (seconds; default 30).
+.TP
+.B IPTABLES_IPSET_RULE_NUMBER
+Position to insert iptables/ip6tables rules when \fB\-\-apply\fR is used (default 1).
+.TP
+.B IPSET_TMP_BLACKLIST_NAME
+Temporary set name for atomic swap operations.
+.TP
+.B FORCE
+Set to "yes" to create ipsets and rules if they don't exist (can be overridden with \-\-force).
+.SH EXAMPLES
+.SS Basic: write optimized restore file only
+.nf
+update_blacklist.py \\
+  --conf /etc/ipset-blacklist/ipset-blacklist.conf
+.fi
+.PP
+Writes the optimized sets to
+.I /etc/ipset-blacklist/ip-blacklist.restore
+without touching the firewall.
+.SS Apply atomically and ensure firewall rules (IPv4\-only)
+.nf
+update_blacklist.py \\
+  --conf /etc/ipset-blacklist/ipset-blacklist.conf \\
+  --apply --ipv4-only
+.fi
+.SS Produce a CLEAN CIDR list (final optimized entries)
+Generate the restore file, then extract just the CIDRs (both families):
+.nf
+update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf
+awk '/^add /{print $3}' /etc/ipset-blacklist/ip-blacklist.restore > clean_cidrs.txt
+.fi
+For the tightest list, include \fB\-\-collapse\fR when generating.
+.SS Analyze: count duplicates and covered subnets from a live dump
+Dump the current kernel set and analyze it:
+.nf
+# Save current IPv4 set
+ipset save blacklist > ./blacklist.dump
+
+# Analyze and show stats + removed entries (to stderr)
+update_blacklist.py --analyze ./blacklist.dump --set blacklist --show-removed
+.fi
+Typical output on stderr:
+.nf
+Total adds: 77283
+Unique adds: 64715
+Exact duplicates removed: 0
+Covered subnets removed: 12568
+.fi
+.SS Analyze: emit a clean CIDR list from a dump
+.nf
+update_blacklist.py --analyze ./blacklist.dump --set blacklist --format cidr \\
+  > ./clean_v4_cidrs.txt
+.fi
+For IPv6 (if present):
+.nf
+update_blacklist.py --analyze ./blacklist6.dump --set blacklist6 --format cidr \\
+  > ./clean_v6_cidrs.txt
+.fi
+.SS Analyze: save "removed -> covering supernet" pairs
+First, capture the removal report to a log:
+.nf
+update_blacklist.py --analyze ./blacklist.dump --set blacklist --show-removed \\
+  2> ./removed.log
+.fi
+Then, extract pairs robustly with \fBawk\fR regex:
+.nf
+awk '
+/removed/ {
+  ip = $2
+  if (match($0, /\(covered by ([^)]+)\)/, m)) {
+    print ip, "covered_by", m[1]
+  }
+}
+' ./removed.log > ./covered_pairs.txt
+.fi
+Just the removed CIDRs (both exact dupes and covered):
+.nf
+awk '/removed/ {print $2}' ./removed.log > ./covered_cidrs.txt
+.fi
+Top covering supernets:
+.nf
+awk '
+/removed/ && /\(covered by / {
+  if (match($0, /\(covered by ([^)]+)\)/, m)) print m[1]
+}
+' ./removed.log | sort | uniq -c | sort -nr | head -50
+.fi
+.SS Validate restore file without applying
+.nf
+ipset restore -n < /etc/ipset-blacklist/ip-blacklist.restore
+.fi
+.SS Nightly cron (mail only on errors)
+.nf
+# /etc/cron.d/update_blacklist
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+MAILTO=root
+
+33 23 * * * root /usr/local/sbin/update_blacklist.py \\
+  --conf /etc/ipset-blacklist/ipset-blacklist.conf \\
+  --apply --ipv4-only > /dev/null
+.fi
+.SH FILES
+.TP
+.I /etc/ipset-blacklist/ipset-blacklist.conf
+Default configuration file.
+.TP
+.I /etc/ipset-blacklist/ip-blacklist.restore
+Default output file.
+.SH EXIT STATUS
+Non\-zero on error (e.g. failed fetch, invalid input, ipset restore failure).
+.SH SEE ALSO
+.BR ipset (8),
+.BR iptables (8),
+.BR ip6tables (8)
+.SH AUTHORS
+Original ipset-blacklist shell script by trick77 (https://github.com/trick77/ipset-blacklist).
+.PP
+Python port and enhancements by:
+.RS
+.IP \(bu 2
+Kenneth Shane Hartman (kshartman @ GitHub, shane@ai.mit.edu)
+.IP \(bu 2
+ChatGPT (OpenAI) - optimization algorithms and feature implementation
+.IP \(bu 2
+Claude (Anthropic) - code improvements and documentation
+.RE
+.SH IMPROVEMENTS OVER ORIGINAL
+The Python implementation provides several enhancements:
+.RS
+.IP \(bu 2
+Advanced O(N·P) subnet optimization (removes covered subnets, not just exact duplicates)
+.IP \(bu 2
+Full IPv6 support with dual-stack handling
+.IP \(bu 2
+\-\-analyze mode for auditing existing ipset files
+.IP \(bu 2
+\-\-dry\-run mode for safe testing
+.IP \(bu 2
+Configurable private IP filtering
+.IP \(bu 2
+Retry logic with exponential backoff for network failures
+.IP \(bu 2
+Proper logging framework with severity levels
+.IP \(bu 2
+Configuration validation with warnings
+.IP \(bu 2
+No shell injection vulnerabilities
+.IP \(bu 2
+Progress indicators that won't flood SSH connections
+.RE
+.SH COMPATIBILITY
+The Python script is designed as a drop-in replacement for the original shell script.
+It reads the same configuration file format and produces compatible ipset restore files.
+Existing cron jobs and automation should work after changing the script name from
+\fBupdate-blacklist.sh\fR to \fBupdate_blacklist.py\fR.
