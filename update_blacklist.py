@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+# pylint: disable=line-too-long
+# pylint: disable=too-many-locals,too-many-branches,too-many-statements
+# pylint: disable=too-many-arguments
+# The above are disabled because:
+# - line-too-long: Some argument descriptions and log messages are clearer when not wrapped
+# - too-many-*: This is a CLI tool with complex main() function handling many options
+# - too-many-arguments: Required for comprehensive configuration options
 """
 Python ipset-blacklist with fast final-list optimization + --apply + --analyze.
 
@@ -526,6 +533,7 @@ def analyze_dumpfile(path: str, sets_filter: Optional[Set[str]] = None) -> Tuple
 
 # ---------------- Main ----------------
 def main():
+    """Main entry point for the ipset-blacklist manager."""
     ap = argparse.ArgumentParser(description="Python ipset-blacklist with fast optimization, --apply and --analyze.")
     ap.add_argument("--conf", default="/etc/ipset-blacklist/ipset-blacklist.conf", help="Config file.")
     ap.add_argument("--out",  default=None, help="Output ipset-restore file; default = IP_BLACKLIST_RESTORE or built-in.")
