@@ -15,14 +15,12 @@ Python ipset-blacklist with fast final-list optimization + --apply + --analyze.
 import argparse
 import ipaddress
 import logging
-import os
 import re
 import sys
 import time
 import urllib.request
 import urllib.error
 import subprocess
-import shlex
 from pathlib import Path
 from typing import List, Tuple, Dict, Set, Optional, Union
 from urllib.parse import urlparse
@@ -71,12 +69,12 @@ def is_local_path(s: str) -> bool:
 
 def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES) -> str:
     """Return text from URL or local file. Empty string on fetch errors.
-    
+
     Args:
         src: URL or file path to fetch
         timeout: Timeout in seconds for network operations
         max_retries: Maximum number of retries for network failures
-    
+
     Returns:
         Content as string, or empty string on error
     """
@@ -88,10 +86,10 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
         except Exception as e:
             logger.debug("Failed to read file %s: %s", src, e)
             return ""
-    
+
     # For HTTPS, ensure certificate verification (urllib default is to verify)
     req = urllib.request.Request(src, headers={"User-Agent":"ipset-blacklist-py"})
-    
+
     last_error = None
     for attempt in range(max_retries + 1):
         try:
@@ -102,7 +100,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                     # 503 is retryable
                     if attempt < max_retries:
                         delay = DEFAULT_RETRY_DELAYS[min(attempt, len(DEFAULT_RETRY_DELAYS)-1)]
-                        logger.debug("Service unavailable (503) for %s, retry %d/%d in %ds", 
+                        logger.debug("Service unavailable (503) for %s, retry %d/%d in %ds",
                                    src, attempt+1, max_retries, delay)
                         time.sleep(delay)
                         continue
@@ -110,7 +108,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                     return ""
                 # Success!
                 return r.read().decode("utf-8", "ignore")
-                
+
         except urllib.error.HTTPError as e:
             # Don't retry on 4xx errors (client errors)
             if 400 <= e.code < 500:
@@ -118,7 +116,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                 return ""
             # 5xx errors are retryable
             last_error = e
-            
+
         except urllib.error.URLError as e:
             # Certificate errors should not be retried (security risk)
             if hasattr(e, 'reason') and 'certificate' in str(e.reason).lower():
@@ -126,21 +124,21 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                 return ""
             # Other URLErrors (network issues) are retryable
             last_error = e
-            
+
         except (OSError, Exception) as e:
             # Network/timeout errors are retryable
             last_error = e
-        
+
         # Retry logic for retryable errors
         if attempt < max_retries:
             delay = DEFAULT_RETRY_DELAYS[min(attempt, len(DEFAULT_RETRY_DELAYS)-1)]
-            logger.debug("Failed to fetch %s (attempt %d/%d): %s. Retrying in %ds", 
+            logger.debug("Failed to fetch %s (attempt %d/%d): %s. Retrying in %ds",
                         src, attempt+1, max_retries+1, last_error, delay)
             time.sleep(delay)
         else:
             # Final failure after all retries
             logger.debug("Failed to fetch %s after %d attempts: %s", src, attempt+1, last_error)
-    
+
     return ""
 
 def parse_addr_token(tok: str) -> Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
@@ -190,6 +188,11 @@ def sort_key_tuple(t: Tuple[int, int, int]) -> Tuple[int, int, int]:
     vbits, addr, plen = t
     return (0 if vbits == 4 else 1, plen, addr)
 
+def format_network_tuple(tt: Tuple[int, int, int]) -> str:
+    """Format a network tuple for display."""
+    n = tuple_to_net(tt)
+    return str(n) if n.prefixlen not in (32, 128) else str(n.network_address)
+
 def progress_tick(i: int, total: int, label: str, next_tick: int, interval_pct: float) -> int:
     if total <= 0:
         return next_tick
@@ -211,18 +214,18 @@ def is_private_ip(network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) 
                 return True
     return False
 
-def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]], 
-                  show_progress: bool = False, 
+def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]],
+                  show_progress: bool = False,
                   interval_pct: float = DEFAULT_PROGRESS_INTERVAL,
                   filter_private: bool = True) -> Tuple[List[Tuple[int, int, int]], List[Tuple]]:
     """Remove exact duplicates and covered subnets; return (kept_tuples, removed_records).
-    
+
     Args:
         nets: List of IP networks to optimize
         show_progress: Show progress indicators
         interval_pct: Progress update interval in percent
         filter_private: Filter out private/reserved IP ranges
-    
+
     Returns:
         Tuple of (kept network tuples, removed records with reasons)
     """
@@ -240,7 +243,7 @@ def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
         nets = filtered_nets
     else:
         private_removed = []
-    
+
     nets = sorted(nets, key=sort_key_net)
 
     # Exact dedup
@@ -304,12 +307,12 @@ def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 def validate_config(cfg: Dict[str, any]) -> List[str]:
     """Validate configuration and return list of warnings."""
     warnings = []
-    
+
     # Check for valid paths
     out_path = Path(cfg["OUT_PATH"])
     if not out_path.parent.exists():
         warnings.append(f"Output directory does not exist: {out_path.parent}")
-    
+
     # Check numeric values
     if cfg["MAXELEM"] < 1000:
         warnings.append(f"MAXELEM seems too low: {cfg['MAXELEM']}")
@@ -317,17 +320,17 @@ def validate_config(cfg: Dict[str, any]) -> List[str]:
         warnings.append(f"HASHSIZE seems too low: {cfg['HASHSIZE']}")
     if cfg["TIMEOUT"] < 5:
         warnings.append(f"TIMEOUT may be too short: {cfg['TIMEOUT']}s")
-    
+
     # Check blacklist sources
     if not cfg["BLACKLISTS"]:
         warnings.append("No blacklist sources configured")
-    
+
     # Check set names
     if not re.match(r'^[A-Za-z0-9:_-]+$', cfg["SET_NAME4"]):
         warnings.append(f"Invalid SET_NAME4: {cfg['SET_NAME4']}")
     if not re.match(r'^[A-Za-z0-9:_-]+$', cfg["SET_NAME6"]):
         warnings.append(f"Invalid SET_NAME6: {cfg['SET_NAME6']}")
-    
+
     return warnings
 
 def load_conf(path: str) -> Dict[str, any]:
@@ -405,13 +408,13 @@ def load_conf(path: str) -> Dict[str, any]:
     m = re.search(r'^\s*IPTABLES_IPSET_RULE_NUMBER\s*=\s*([0-9]+)\s*$', text, re.M)
     if m:
         cfg["IPTABLES_POS"] = max(1, int(m.group(1)))
-    
+
     # Check for IPSET_TMP_BLACKLIST_NAME
     m = re.search(r'^\s*IPSET_TMP_BLACKLIST_NAME\s*=\s*([A-Za-z0-9:_-]+)\s*$', text, re.M)
     if m:
         cfg["SET_TMP_NAME4"] = m.group(1)
         cfg["SET_TMP_NAME6"] = m.group(1) + "6"  # Assume same pattern
-    
+
     # Check for FORCE mode
     m = re.search(r'^\s*FORCE\s*=\s*(yes|no)\s*$', text, re.M)
     if m:
@@ -420,7 +423,7 @@ def load_conf(path: str) -> Dict[str, any]:
     return cfg
 
 # ---------------- Restore writer (IPv6-safe) ----------------
-def write_restore(path: str, set4: str, set6: str, hashsize: int, maxelem: int, 
+def write_restore(path: str, set4: str, set6: str, hashsize: int, maxelem: int,
                   v4: List[str], v6: List[str], tmp: bool = False, dry_run: bool = False,
                   set4_tmp: Optional[str] = None, set6_tmp: Optional[str] = None) -> str:
     """
@@ -480,12 +483,12 @@ def write_restore(path: str, set4: str, set6: str, hashsize: int, maxelem: int,
 # ---------------- Rules ----------------
 def ensure_rule(cmd_check: List[str], cmd_insert: List[str], dry_run: bool = False) -> bool:
     """Idempotently ensure an iptables/ip6tables rule exists.
-    
+
     Args:
         cmd_check: Command list to check if rule exists
         cmd_insert: Command list to insert rule
         dry_run: If True, only simulate
-    
+
     Returns:
         True if rule already exists, False if it was inserted
     """
@@ -547,7 +550,7 @@ def main():
     ap.add_argument("--set", dest="sets", action="append", default=[], help="When using --analyze, limit to this set name (repeatable).")
     ap.add_argument("--format", choices=["add","cidr"], default="add", help="When emitting lists (analyze/normal), choose output format.")
     args = ap.parse_args()
-    
+
     # Configure logging based on verbosity
     if args.quiet:
         logging.basicConfig(level=logging.ERROR, format='%(message)s')
@@ -555,7 +558,7 @@ def main():
         logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     else:
         logging.basicConfig(level=logging.INFO, format='%(message)s')
-    
+
     # Dry run implies no-write unless --apply is also specified
     if args.dry_run:
         logger.info("[DRY RUN MODE] No changes will be made to the system")
@@ -590,17 +593,14 @@ def main():
             logger.info("Private IPs filtered: %d", private)
 
         if args.show_removed:
-            def fmt(tt):
-                n = tuple_to_net(tt)
-                return str(n) if n.prefixlen not in (32,128) else str(n.network_address)
             logger.info("\n# Removed entries:")
             for t, reason, cov in removed:
                 if reason == "exact-duplicate":
-                    logger.info("# %s  -> removed as exact duplicate", fmt(t))
+                    logger.info("# %s  -> removed as exact duplicate", format_network_tuple(t))
                 elif reason == "private-ip":
-                    logger.info("# %s  -> removed as private IP", fmt(t))
+                    logger.info("# %s  -> removed as private IP", format_network_tuple(t))
                 else:
-                    logger.info("# %s  -> removed (covered by %s)", fmt(t), fmt(cov))
+                    logger.info("# %s  -> removed (covered by %s)", format_network_tuple(t), format_network_tuple(cov))
 
         kept_t.sort(key=sort_key_tuple)
         if args.format == "cidr":
@@ -616,17 +616,17 @@ def main():
 
     # NORMAL FLOW (conf-driven)
     cfg = load_conf(args.conf)
-    
+
     # Validate configuration
     warnings = validate_config(cfg)
     for warning in warnings:
         logger.warning("Config warning: %s", warning)
-    
+
     # Apply FORCE from config if not overridden by command line
     if not args.force and cfg.get("FORCE"):
         args.force = True
         logger.debug("Enabled FORCE mode from config")
-    
+
     out_path = args.out or cfg["OUT_PATH"]
     set4, set6 = cfg["SET_NAME4"], cfg["SET_NAME6"]
     hashsize, maxelem = cfg["HASHSIZE"], cfg["MAXELEM"]
@@ -649,7 +649,7 @@ def main():
             next_tick = progress_tick(i, total, "Fetching sources", next_tick, args.progress_interval)
     if args.progress and sources:
         sys.stderr.write("\n")
-    
+
     logger.info("Parsed entries: %d", len(raw_networks))
 
     # Optimize
@@ -688,27 +688,24 @@ def main():
     set4_tmp = cfg.get("SET_TMP_NAME4")
     set6_tmp = cfg.get("SET_TMP_NAME6")
     if args.apply:
-        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6, 
+        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
                                     tmp=True, dry_run=args.dry_run, set4_tmp=set4_tmp, set6_tmp=set6_tmp)
     elif not args.no_write:
-        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6, 
+        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
                                     tmp=False, dry_run=args.dry_run)
 
     # Removed report (if requested)
     if args.show_removed:
-        def fmt(tt):
-            n = tuple_to_net(tt)
-            return str(n) if n.prefixlen not in (32,128) else str(n.network_address)
         by_reason = {"exact-duplicate":0, "covered-by-broader":0, "private-ip":0}
         logger.info("\n# Removed entries:")
         for t, reason, cov in removed:
             by_reason[reason] = by_reason.get(reason,0)+1
             if reason == "exact-duplicate":
-                logger.info("# %s  -> removed as exact duplicate", fmt(t))
+                logger.info("# %s  -> removed as exact duplicate", format_network_tuple(t))
             elif reason == "private-ip":
-                logger.info("# %s  -> removed as private IP", fmt(t))
+                logger.info("# %s  -> removed as private IP", format_network_tuple(t))
             else:
-                logger.info("# %s  -> removed (covered by %s)", fmt(t), fmt(cov))
+                logger.info("# %s  -> removed (covered by %s)", format_network_tuple(t), format_network_tuple(cov))
         logger.info("# Totals: exact-duplicate=%d, covered-by-broader=%d, private-ip=%d",
                    by_reason.get('exact-duplicate',0),
                    by_reason.get('covered-by-broader',0),
@@ -721,21 +718,21 @@ def main():
         if not restore_text.strip():
             logger.warning("Nothing to apply (no entries). Skipping ipset restore.")
             return
-        
+
         # Check if sets exist, create if --force
         if not args.dry_run and args.force:
             for setname, family in [(set4, "inet"), (set6, "inet6")]:
                 if (setname == set4 and not v4) or (setname == set6 and not v6):
                     continue
                 try:
-                    subprocess.run(["ipset", "list", "-n", setname], 
+                    subprocess.run(["ipset", "list", "-n", setname],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 except subprocess.CalledProcessError:
                     logger.info("Creating ipset %s (--force mode)", setname)
                     subprocess.run(["ipset", "create", setname, DEFAULT_HASH_V4 if family == "inet" else DEFAULT_HASH_V6,
                                   "family", family, "hashsize", str(hashsize), "maxelem", str(maxelem)],
                                  check=False)
-        
+
         if args.dry_run:
             logger.info("[DRY RUN] Would apply ipset restore with %d lines", len(restore_text.splitlines()))
         else:
