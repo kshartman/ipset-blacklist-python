@@ -54,14 +54,30 @@ fi
 
 # Check for ipset
 if ! command -v ipset &> /dev/null; then
-    echo -e "${YELLOW}Warning: ipset is not installed${NC}"
+    echo -e "${RED}Error: ipset is not installed${NC}"
     echo "Install with: apt-get install ipset"
+    exit 1
+else
+    # Verify ipset actually works
+    if ! ipset list -n &> /dev/null; then
+        echo -e "${RED}Error: ipset command found but not working${NC}"
+        echo "Check that ipset kernel modules are loaded"
+        exit 1
+    fi
 fi
 
 # Check for iptables
 if ! command -v iptables &> /dev/null; then
-    echo -e "${YELLOW}Warning: iptables is not installed${NC}"
+    echo -e "${RED}Error: iptables is not installed${NC}"
     echo "Install with: apt-get install iptables"
+    exit 1
+else
+    # Verify iptables actually works
+    if ! iptables -L -n &> /dev/null; then
+        echo -e "${RED}Error: iptables command found but not working${NC}"
+        echo "Check that iptables kernel modules are loaded"
+        exit 1
+    fi
 fi
 
 echo "✓ Prerequisites checked"
