@@ -33,7 +33,7 @@ import urllib.request
 import urllib.error
 import subprocess
 from pathlib import Path
-from typing import List, Tuple, Dict, Set, Optional, Union
+from typing import Any, List, Tuple, Dict, Set, Optional, Union
 from urllib.parse import urlparse
 
 # ---------------- Defaults ----------------
@@ -50,19 +50,21 @@ DEFAULT_MAX_RETRIES = 2  # Total of 3 attempts
 DEFAULT_RETRY_DELAYS = [1, 4]  # Exponential backoff in seconds
 
 # Private IP ranges to filter by default (RFC 1918, loopback, etc.)
-PRIVATE_NETWORKS = [
-    ipaddress.ip_network("0.0.0.0/8"),      # Current network
-    ipaddress.ip_network("10.0.0.0/8"),     # Private
-    ipaddress.ip_network("127.0.0.0/8"),    # Loopback
-    ipaddress.ip_network("169.254.0.0/16"), # Link-local
-    ipaddress.ip_network("172.16.0.0/12"),  # Private
-    ipaddress.ip_network("192.168.0.0/16"), # Private
-    ipaddress.ip_network("224.0.0.0/4"),    # Multicast
-    ipaddress.ip_network("240.0.0.0/4"),    # Reserved
-    ipaddress.ip_network("::1/128"),        # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),       # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),      # IPv6 link-local
-    ipaddress.ip_network("ff00::/8"),       # IPv6 multicast
+PRIVATE_NETWORKS_V4: List[ipaddress.IPv4Network] = [
+    ipaddress.IPv4Network("0.0.0.0/8"),      # Current network
+    ipaddress.IPv4Network("10.0.0.0/8"),     # Private
+    ipaddress.IPv4Network("127.0.0.0/8"),    # Loopback
+    ipaddress.IPv4Network("169.254.0.0/16"), # Link-local
+    ipaddress.IPv4Network("172.16.0.0/12"),  # Private
+    ipaddress.IPv4Network("192.168.0.0/16"), # Private
+    ipaddress.IPv4Network("224.0.0.0/4"),    # Multicast
+    ipaddress.IPv4Network("240.0.0.0/4"),    # Reserved
+]
+PRIVATE_NETWORKS_V6: List[ipaddress.IPv6Network] = [
+    ipaddress.IPv6Network("::1/128"),        # IPv6 loopback
+    ipaddress.IPv6Network("fc00::/7"),       # IPv6 unique local
+    ipaddress.IPv6Network("fe80::/10"),      # IPv6 link-local
+    ipaddress.IPv6Network("ff00::/8"),       # IPv6 multicast
 ]
 
 # Configure logging
@@ -168,7 +170,8 @@ def parse_entry(line: str) -> Optional[Union[ipaddress.IPv4Network, ipaddress.IP
     if not line or COMMENT.match(line):
         return None
     m = ADD_LINE.match(line)
-    tok = m.group(1) if m else (CIDR_OR_IP.match(line).group(1) if CIDR_OR_IP.match(line) else None)
+    cidr_m = CIDR_OR_IP.match(line)
+    tok = m.group(1) if m else (cidr_m.group(1) if cidr_m else None)
     if not tok:
         return None
     return parse_addr_token(tok)
@@ -219,11 +222,9 @@ def progress_tick(i: int, total: int, label: str, next_tick: int, interval_pct: 
 # ---------------- Optimizer ----------------
 def is_private_ip(network: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> bool:
     """Check if a network is in private/reserved IP ranges."""
-    for private_net in PRIVATE_NETWORKS:
-        if network.version == private_net.version:
-            if network.subnet_of(private_net) or network.supernet_of(private_net):
-                return True
-    return False
+    if isinstance(network, ipaddress.IPv4Network):
+        return any(network.subnet_of(p) or network.supernet_of(p) for p in PRIVATE_NETWORKS_V4)
+    return any(network.subnet_of(p) or network.supernet_of(p) for p in PRIVATE_NETWORKS_V6)
 
 def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]],
                   show_progress: bool = False,
@@ -315,7 +316,7 @@ def optimize_fast(nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
     return kept, removed
 
 # ---------------- Conf parsing ----------------
-def validate_config(cfg: Dict[str, any]) -> List[str]:
+def validate_config(cfg: Dict[str, Any]) -> List[str]:
     """Validate configuration and return list of warnings."""
     warnings = []
 
@@ -344,7 +345,7 @@ def validate_config(cfg: Dict[str, any]) -> List[str]:
 
     return warnings
 
-def load_conf(path: str) -> Dict[str, any]:
+def load_conf(path: str) -> Dict[str, Any]:
     """
     Recognized:
       BLACKLISTS=( ... )
@@ -673,8 +674,13 @@ def main():
     kept_t.sort(key=sort_key_tuple)
 
     if args.collapse:
-        nets2 = [tuple_to_net(t) for t in kept_t]
-        nets2 = list(ipaddress.collapse_addresses(nets2))
+        _pre = [tuple_to_net(t) for t in kept_t]
+        _v4 = [n for n in _pre if isinstance(n, ipaddress.IPv4Network)]
+        _v6 = [n for n in _pre if isinstance(n, ipaddress.IPv6Network)]
+        nets2: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = [
+            *ipaddress.collapse_addresses(_v4),
+            *ipaddress.collapse_addresses(_v6),
+        ]
         nets2.sort(key=sort_key_net)
         for n in nets2:
             if n.version == 4:
