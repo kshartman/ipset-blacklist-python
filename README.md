@@ -49,6 +49,16 @@ The Python script is designed as a **drop-in replacement** for the original shel
 - `iptables` (and `ip6tables` if using IPv6)
 - **No Python packages required** - uses only standard library
 
+## Development
+
+```bash
+# Run tests
+python3 -m unittest test_update_blacklist -v
+
+# Activate the pre-commit hook (run once after cloning)
+git config core.hooksPath .githooks
+```
+
 ## Installation
 
 ```bash
