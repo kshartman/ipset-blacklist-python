@@ -83,9 +83,19 @@ fi
 echo "✓ Prerequisites checked"
 echo
 
-# Install executable
+# Read version
+if [ -f "VERSION" ]; then
+    VERSION=$(cat VERSION | tr -d '[:space:]')
+    echo -e "${GREEN}✓ Version: $VERSION${NC}"
+else
+    echo -e "${RED}Error: VERSION file not found${NC}"
+    exit 1
+fi
+
+# Install executable with version stamped
 echo "Installing executable..."
 install -m 0755 "$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
+sed -i "s/^__version__ = \"dev\"/__version__ = \"$VERSION\"/" "$INSTALL_DIR/$SCRIPT_NAME"
 echo -e "${GREEN}✓ Installed: $INSTALL_DIR/$SCRIPT_NAME${NC}"
 
 # Install man page if it exists

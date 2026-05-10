@@ -28,6 +28,8 @@ import ipaddress
 import logging
 import re
 import sys
+
+__version__ = "dev"
 import time
 import urllib.request
 import urllib.error
@@ -531,6 +533,7 @@ def analyze_dumpfile(path: str, sets_filter: Optional[Set[str]] = None) -> Tuple
 def main():
     """Main entry point for the ipset-blacklist manager."""
     ap = argparse.ArgumentParser(description="Python ipset-blacklist with fast optimization, --apply and --analyze.")
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     ap.add_argument("--conf", default="/etc/ipset-blacklist/ipset-blacklist.conf", help="Config file.")
     ap.add_argument("--out",  default=None, help="Output ipset-restore file; default = IP_BLACKLIST_RESTORE or built-in.")
     ap.add_argument("--progress", action="store_true", help="Show progress to stderr.")

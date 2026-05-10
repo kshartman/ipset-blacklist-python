@@ -7,6 +7,7 @@ import textwrap
 import unittest
 
 from update_blacklist import (
+    __version__,
     analyze_dumpfile,
     is_local_path,
     is_private_ip,
@@ -440,6 +441,15 @@ class TestAnalyzeDumpfile(unittest.TestCase):
         nets, totals = analyze_dumpfile(path)
         self.assertEqual(nets, [])
         self.assertEqual(totals["adds_total"], 0)
+
+
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+class TestVersion(unittest.TestCase):
+    def test_version_is_string(self):
+        self.assertIsInstance(__version__, str)
+        self.assertTrue(len(__version__) > 0)
 
 
 if __name__ == "__main__":
