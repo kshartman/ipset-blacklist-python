@@ -5,6 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
+# Run tests
+python3 -m unittest test_update_blacklist -v
+
 # Lint
 pylint update_blacklist.py
 
@@ -14,7 +17,7 @@ sudo python3 update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.con
 # Run specific feature without network access
 sudo python3 update_blacklist.py --analyze blacklist.dump --set blacklist --show-removed
 
-# Deploy (installs to /usr/local/sbin)
+# Deploy (installs to /usr/local/sbin, stamps version from VERSION file)
 sudo ./deploy.sh
 ```
 

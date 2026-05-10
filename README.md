@@ -62,10 +62,11 @@ git config core.hooksPath .githooks
 ## Installation
 
 ```bash
-# Install the script
-sudo install -m 0755 update_blacklist.py /usr/local/sbin/update_blacklist.py
+# Automated install (stamps version, installs man page, runs preflight checks)
+sudo ./deploy.sh
 
-# Install man page
+# Or install manually
+sudo install -m 0755 update_blacklist.py /usr/local/sbin/update_blacklist.py
 sudo install -d /usr/local/share/man/man8
 sudo install -m 0644 update_blacklist.8 /usr/local/share/man/man8/
 sudo mandb
@@ -130,6 +131,7 @@ sudo update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --no-f
 
 ### Enhanced Options
 
+- `--version` - Show version number and exit
 - `--dry-run` - Simulate without making changes
 - `--force` - Create ipsets/rules if missing (like FORCE=yes)
 - `--verbose` / `--quiet` - Control output verbosity
