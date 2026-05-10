@@ -43,6 +43,27 @@ The script maintains separate v4 and v6 network lists throughout. Sets are named
 
 `ipset-blacklist.conf` uses bash variable syntax. The parser extracts values with regex; it does **not** source the file. Supported keys: `IPSET_BLACKLIST_NAME`, `IP_BLACKLIST_RESTORE`, `IP_BLACKLIST`, `BLACKLISTS`, `MAXELEM`, `HASHSIZE`, `VERBOSE`, `FORCE`, `IPTABLES_IPSET_RULE_NUMBER`.
 
+### Deployment hosts
+
+Config lives at `/etc/ipset-blacklist/ipset-blacklist.conf` on each host. Changes to the config must be applied per-host (not centrally managed).
+
+| Host | ipset-blacklist | GeoIP |
+|------|:-:|:--|
+| cs | yes | geoipupdate + cron + timer |
+| mx | yes | geoipupdate + cron + timer |
+| notifications | yes | geoipupdate + cron + timer |
+| nx | yes | geoipupdate + cron + timer |
+| ux | yes | geoipupdate + cron + timer |
+| talon | yes | geoipupdate + cron + timer |
+| worf | yes | geoipupdate + cron + timer |
+| ws | yes | geoipupdate + cron + timer |
+| dev | no | no |
+| duo | no | no |
+| lamp | no | no |
+| mdb | no | no |
+| ndao | no | no |
+| xt | no | no |
+
 ### Private IP filtering
 
 `PRIVATE_NETWORKS` constant lists RFC1918, loopback, link-local, multicast, and IPv6 equivalents. Applied after parsing, before dedup. Disable with `--no-filter-private`.

@@ -8,6 +8,7 @@ import unittest
 
 from update_blacklist import (
     analyze_dumpfile,
+    is_local_path,
     is_private_ip,
     load_conf,
     optimize_fast,
@@ -15,6 +16,30 @@ from update_blacklist import (
     parse_entry,
     write_restore,
 )
+
+# ---------------------------------------------------------------------------
+# is_local_path
+# ---------------------------------------------------------------------------
+class TestIsLocalPath(unittest.TestCase):
+
+    def test_plain_path(self):
+        self.assertTrue(is_local_path("/etc/ipset-blacklist/custom.list"))
+
+    def test_relative_path(self):
+        self.assertTrue(is_local_path("blocklist.txt"))
+
+    def test_file_url(self):
+        self.assertTrue(is_local_path("file:///etc/ipset-blacklist/custom.list"))
+
+    def test_http_url(self):
+        self.assertFalse(is_local_path("http://example.com/list.txt"))
+
+    def test_https_url(self):
+        self.assertFalse(is_local_path("https://example.com/list.txt"))
+
+    def test_empty_string(self):
+        self.assertFalse(is_local_path(""))
+
 
 # ---------------------------------------------------------------------------
 # parse_addr_token

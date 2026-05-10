@@ -78,7 +78,11 @@ COMMENT          = re.compile(r'^\s*[#;]')
 
 # ---------------- Helpers ----------------
 def is_local_path(s: str) -> bool:
-    return bool(s) and ("://" not in s or urlparse(s).scheme == '')
+    if not s:
+        return False
+    if "://" not in s:
+        return True
+    return urlparse(s).scheme in ('', 'file')
 
 def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES) -> str:
     """Return text from URL or local file. Empty string on fetch errors.
@@ -106,20 +110,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
     last_error = None
     for attempt in range(max_retries + 1):
         try:
-            # Note: urllib.request verifies SSL certificates by default since Python 2.7.9/3.4.3
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                status = getattr(r, "status", 200)
-                if status == 503:
-                    # 503 is retryable
-                    if attempt < max_retries:
-                        delay = DEFAULT_RETRY_DELAYS[min(attempt, len(DEFAULT_RETRY_DELAYS)-1)]
-                        logger.debug("Service unavailable (503) for %s, retry %d/%d in %ds",
-                                   src, attempt+1, max_retries, delay)
-                        time.sleep(delay)
-                        continue
-                    logger.debug("Service unavailable (503) for %s after %d attempts", src, attempt+1)
-                    return ""
-                # Success!
                 return r.read().decode("utf-8", "ignore")
 
         except urllib.error.HTTPError as e:
