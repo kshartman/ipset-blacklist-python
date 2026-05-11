@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for update_blacklist.py — parsing, dedup, config, restore output."""
 
+import email.message
 import ipaddress
 import json
 import subprocess
@@ -12,7 +13,6 @@ from unittest import mock
 
 from update_blacklist import (
     Config,
-    DEFAULT_MAX_FAIL_RATIO,
     DEFAULT_NFT_SET_V4,
     DEFAULT_NFT_SET_V6,
     DEFAULT_NFT_TABLE,
@@ -376,11 +376,11 @@ class TestLoadConf(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestWriteRestore(unittest.TestCase):
 
-    def _cfg(self, **overrides):
-        defaults = dict(out_path="/dev/null", set_v4="bl", set_v6="bl6",
-                        hashsize=16384, maxelem=65536)
+    def _cfg(self, **overrides: object) -> Config:
+        defaults: dict[str, object] = dict(out_path="/dev/null", set_v4="bl", set_v6="bl6",
+                                           hashsize=16384, maxelem=65536)
         defaults.update(overrides)
-        return Config(**defaults)
+        return Config(**defaults)  # type: ignore[arg-type]
 
     def test_v4_only(self):
         text = write_restore(self._cfg(), ["1.2.3.4", "5.6.7.0/24"], [],
@@ -418,6 +418,26 @@ class TestWriteRestore(unittest.TestCase):
                              tmp=True, dry_run=True)
         self.assertIn("create my-tmp", text)
         self.assertIn("swap my-tmp bl", text)
+
+    def test_v6_none_skips_v6(self):
+        text = write_restore(self._cfg(), ["1.2.3.4"], None, dry_run=True)
+        self.assertIn("add bl 1.2.3.4", text)
+        self.assertNotIn("bl6", text)
+
+    def test_v4_none_skips_v4(self):
+        text = write_restore(self._cfg(), None, ["2001:db8::1"], dry_run=True)
+        self.assertIn("add bl6 2001:db8::1", text)
+        self.assertNotIn("create bl ", text)
+
+    def test_both_none_produces_empty(self):
+        text = write_restore(self._cfg(), None, None, dry_run=True)
+        self.assertEqual(text, "")
+
+    def test_v6_none_tmp_mode(self):
+        text = write_restore(self._cfg(), ["1.2.3.4"], None, tmp=True,
+                             dry_run=True)
+        self.assertIn("swap bl-tmp bl", text)
+        self.assertNotIn("bl6", text)
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +554,7 @@ class TestParseNftDump(unittest.TestCase):
 
     def test_empty_set(self):
         data = {"nftables": [{"set": {"name": "v4", "elem": []}}]}
-        nets, totals = parse_nft_dump(self._write_json(data))
+        _, totals = parse_nft_dump(self._write_json(data))
         self.assertEqual(totals["adds_total"], 0)
 
     def test_malformed_json(self):
@@ -566,10 +586,10 @@ class TestFormatNetStr(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestWriteNftBatch(unittest.TestCase):
 
-    def _cfg(self, **overrides):
-        defaults = dict(out_path="/dev/null")
+    def _cfg(self, **overrides: object) -> Config:
+        defaults: dict[str, object] = dict(out_path="/dev/null")
         defaults.update(overrides)
-        return Config(**defaults)
+        return Config(**defaults)  # type: ignore[arg-type]
 
     def test_v4_only(self):
         with tempfile.NamedTemporaryFile(suffix=".nft", delete=False) as f:
@@ -617,6 +637,22 @@ class TestWriteNftBatch(unittest.TestCase):
                                ["1.1.1.1"], [], dry_run=True)
         self.assertIn("flush set inet mytable myset4", text)
         self.assertIn("add element inet mytable myset4 { 1.1.1.1 }", text)
+
+    def test_v6_none_skips_v6(self):
+        text = write_nft_batch(self._cfg(), ["1.2.3.4"], None, dry_run=True)
+        self.assertIn("flush set inet blacklist v4", text)
+        self.assertIn("add element inet blacklist v4 { 1.2.3.4 }", text)
+        self.assertNotIn("v6", text)
+
+    def test_v4_none_skips_v4(self):
+        text = write_nft_batch(self._cfg(), None, ["::1"], dry_run=True)
+        self.assertIn("flush set inet blacklist v6", text)
+        self.assertIn("add element inet blacklist v6 { ::1 }", text)
+        self.assertNotIn("v4", text)
+
+    def test_both_none_produces_empty(self):
+        text = write_nft_batch(self._cfg(), None, None, dry_run=True)
+        self.assertEqual(text, "")
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +726,7 @@ class TestCheckNftTableValid(unittest.TestCase):
 
     def _nft_json(self, sets):
         """Build nft -j output with given set names."""
-        items = [{"metainfo": {"json_schema_version": 1}}]
+        items: list[dict] = [{"metainfo": {"json_schema_version": 1}}]
         items.append({"table": {"family": "inet", "name": "blacklist"}})
         for s in sets:
             items.append({"set": {"family": "inet", "name": s, "table": "blacklist",
@@ -826,7 +862,7 @@ class TestMainNftIntegration(unittest.TestCase):
 
     @mock.patch("update_blacklist.detect_backend", return_value="ipset")
     @mock.patch("update_blacklist.subprocess.run")
-    def test_apply_ipset_calls_ipset_restore(self, mock_run, _det):
+    def test_apply_ipset_calls_ipset_restore(self, mock_run, _):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
         conf = self._make_conf()
         out = tempfile.NamedTemporaryFile(suffix=".restore", delete=False)
@@ -922,7 +958,7 @@ class TestImportExport(unittest.TestCase):
         src.write("add blacklist 1.2.3.4\nadd blacklist 10.0.0.0/8\n")
         src.close()
 
-        from update_blacklist import analyze_dumpfile, parse_nft_dump
+        from update_blacklist import analyze_dumpfile
         nets_orig, _ = analyze_dumpfile(src.name)
         orig_strs = sorted(str(n) for n in nets_orig)
 
@@ -960,6 +996,8 @@ class TestFetchSource(unittest.TestCase):
             f.write("1.2.3.4\n5.6.7.8\n")
             f.flush()
             result = fetch_source(f.name, timeout=5)
+        self.assertIsNotNone(result)
+        assert result is not None
         self.assertIn("1.2.3.4", result)
         self.assertIn("5.6.7.8", result)
 
@@ -968,11 +1006,13 @@ class TestFetchSource(unittest.TestCase):
             f.write("10.0.0.1\n")
             f.flush()
             result = fetch_source(f"file://{f.name}", timeout=5)
+        self.assertIsNotNone(result)
+        assert result is not None
         self.assertIn("10.0.0.1", result)
 
     def test_local_file_missing(self):
         result = fetch_source("/nonexistent/path/file.txt", timeout=5)
-        self.assertEqual(result, "")
+        self.assertIsNone(result)
 
     @mock.patch("update_blacklist.urllib.request.urlopen")
     def test_http_success(self, mock_urlopen):
@@ -982,6 +1022,8 @@ class TestFetchSource(unittest.TestCase):
         mock_resp.__exit__ = mock.MagicMock(return_value=False)
         mock_urlopen.return_value = mock_resp
         result = fetch_source("https://example.com/list.txt", timeout=10)
+        self.assertIsNotNone(result)
+        assert result is not None
         self.assertIn("1.1.1.1", result)
         mock_urlopen.assert_called_once()
 
@@ -990,9 +1032,10 @@ class TestFetchSource(unittest.TestCase):
     def test_http_4xx_no_retry(self, mock_urlopen, mock_sleep):
         import urllib.error
         mock_urlopen.side_effect = urllib.error.HTTPError(
-            "https://example.com/list.txt", 404, "Not Found", {}, None)
+            "https://example.com/list.txt", 404, "Not Found",
+            email.message.Message(), None)
         result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
-        self.assertEqual(result, "")
+        self.assertIsNone(result)
         mock_urlopen.assert_called_once()
         mock_sleep.assert_not_called()
 
@@ -1001,25 +1044,28 @@ class TestFetchSource(unittest.TestCase):
     def test_http_5xx_retries(self, mock_urlopen, mock_sleep):
         import urllib.error
         mock_urlopen.side_effect = urllib.error.HTTPError(
-            "https://example.com/list.txt", 503, "Service Unavailable", {}, None)
+            "https://example.com/list.txt", 503, "Service Unavailable",
+            email.message.Message(), None)
         result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
-        self.assertEqual(result, "")
+        self.assertIsNone(result)
         self.assertEqual(mock_urlopen.call_count, 3)
         self.assertEqual(mock_sleep.call_count, 2)
 
     @mock.patch("update_blacklist.time.sleep")
     @mock.patch("update_blacklist.urllib.request.urlopen")
-    def test_http_5xx_then_success(self, mock_urlopen, mock_sleep):
+    def test_http_5xx_then_success(self, mock_urlopen, _):
         import urllib.error
         mock_resp = mock.MagicMock()
         mock_resp.read.return_value = b"9.9.9.9\n"
         mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = mock.MagicMock(return_value=False)
         mock_urlopen.side_effect = [
-            urllib.error.HTTPError("u", 500, "ISE", {}, None),
+            urllib.error.HTTPError("u", 500, "ISE", email.message.Message(), None),
             mock_resp,
         ]
         result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertIsNotNone(result)
+        assert result is not None
         self.assertIn("9.9.9.9", result)
         self.assertEqual(mock_urlopen.call_count, 2)
 
@@ -1030,17 +1076,17 @@ class TestFetchSource(unittest.TestCase):
         mock_urlopen.side_effect = urllib.error.URLError(
             "SSL: certificate verify failed")
         result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
-        self.assertEqual(result, "")
+        self.assertIsNone(result)
         mock_urlopen.assert_called_once()
         mock_sleep.assert_not_called()
 
     @mock.patch("update_blacklist.time.sleep")
     @mock.patch("update_blacklist.urllib.request.urlopen")
-    def test_network_error_retries(self, mock_urlopen, mock_sleep):
+    def test_network_error_retries(self, mock_urlopen, _):
         import urllib.error
         mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
         result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
-        self.assertEqual(result, "")
+        self.assertIsNone(result)
         self.assertEqual(mock_urlopen.call_count, 3)
 
     @mock.patch("update_blacklist.urllib.request.urlopen")

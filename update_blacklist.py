@@ -108,16 +108,13 @@ def is_local_path(s: str) -> bool:
         return True
     return urlparse(s).scheme in ('', 'file')
 
-def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES) -> str:
-    """Return text from URL or local file. Empty string on fetch errors.
-
-    Args:
-        src: URL or file path to fetch
-        timeout: Timeout in seconds for network operations
-        max_retries: Maximum number of retries for network failures
+def fetch_source(src: str, timeout: int,
+                 max_retries: int = DEFAULT_MAX_RETRIES) -> Optional[str]:
+    """Return text from URL or local file. None on fetch errors.
 
     Returns:
-        Content as string, or empty string on error
+        Content as string on success (may be empty for a valid empty source),
+        or None on error (unreachable, permission denied, etc.).
     """
     if is_local_path(src):
         path = urlparse(src).path if src.startswith("file://") else src
@@ -126,9 +123,8 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                 return f.read()
         except OSError as e:
             logger.debug("Failed to read file %s: %s", src, e)
-            return ""
+            return None
 
-    # For HTTPS, ensure certificate verification (urllib default is to verify)
     req = urllib.request.Request(src, headers={"User-Agent":"ipset-blacklist-py"})
 
     last_error = None
@@ -138,35 +134,29 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
                 return r.read().decode("utf-8", "ignore")
 
         except urllib.error.HTTPError as e:
-            # Don't retry on 4xx errors (client errors)
             if 400 <= e.code < 500:
                 logger.debug("HTTP %d error for %s (not retrying)", e.code, src)
-                return ""
-            # 5xx errors are retryable
+                return None
             last_error = e
 
         except urllib.error.URLError as e:
-            # Certificate errors should not be retried (security risk)
             if hasattr(e, 'reason') and 'certificate' in str(e.reason).lower():
                 logger.warning("SSL certificate verification failed for %s: %s", src, e.reason)
-                return ""
-            # Other URLErrors (network issues) are retryable
+                return None
             last_error = e
 
         except OSError as e:
             last_error = e
 
-        # Retry logic for retryable errors
         if attempt < max_retries:
             delay = DEFAULT_RETRY_DELAYS[min(attempt, len(DEFAULT_RETRY_DELAYS)-1)]
             logger.debug("Failed to fetch %s (attempt %d/%d): %s. Retrying in %ds",
                         src, attempt+1, max_retries+1, last_error, delay)
             time.sleep(delay)
         else:
-            # Final failure after all retries
             logger.debug("Failed to fetch %s after %d attempts: %s", src, attempt+1, last_error)
 
-    return ""
+    return None
 
 def parse_addr_token(tok: str) -> Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]:
     """Return IPv4/IPv6 network for '1.2.3.0/24' or '1.2.3.4' (host->/32,/128)."""
@@ -531,6 +521,8 @@ def _restore_lines(families: List[Tuple], hashsize: int, maxelem: int,
     """Generate ipset restore command lines for each address family."""
     lines: List[str] = []
     for setname, tmpname, hashtype, family, entries in families:
+        if entries is None:
+            continue
         if not entries and not tmp:
             continue
         if tmp:
@@ -549,30 +541,35 @@ def _restore_lines(families: List[Tuple], hashsize: int, maxelem: int,
     return lines
 
 
-def write_restore(cfg: Config, v4: List[str], v6: List[str],
+def write_restore(cfg: Config, v4: Optional[List[str]], v6: Optional[List[str]],
                   tmp: bool = False, dry_run: bool = False) -> str:
-    """Emit ipset-restore commands. Only writes family blocks that have entries."""
+    """Emit ipset-restore commands. Skips unmanaged families (None)."""
     families = [
         (cfg.set_v4, cfg.set_tmp_v4 or f"{cfg.set_v4}-tmp", DEFAULT_HASH_V4, "inet", v4),
         (cfg.set_v6, cfg.set_tmp_v6 or f"{cfg.set_v6}-tmp", DEFAULT_HASH_V6, "inet6", v6),
     ]
     lines = _restore_lines(families, cfg.hashsize, cfg.maxelem, tmp)
+    v4_count = len(v4) if v4 is not None else 0
+    v6_count = len(v6) if v6 is not None else 0
     text = "\n".join(lines) + ("\n" if lines else "")
     if dry_run:
         logger.info("[DRY RUN] Would write restore file: %s (v4=%d, v6=%d)",
-                    cfg.out_path, len(v4), len(v6))
+                    cfg.out_path, v4_count, v6_count)
     else:
         with open(cfg.out_path, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info("Wrote restore file: %s (v4=%d, v6=%d)", cfg.out_path, len(v4), len(v6))
+        logger.info("Wrote restore file: %s (v4=%d, v6=%d)", cfg.out_path, v4_count, v6_count)
     return text
 
 # ---------------- nft batch writer ----------------
 NFT_CHUNK_SIZE = 10000
 
-def write_nft_batch(cfg: Config, v4: List[str], v6: List[str],
+def write_nft_batch(cfg: Config, v4: Optional[List[str]], v6: Optional[List[str]],
                     dry_run: bool = False) -> str:
     """Write an nft batch script that flushes and repopulates sets.
+
+    A family value of None means "unmanaged — skip entirely."  An empty
+    list means "managed but empty — flush the kernel set."
 
     Elements are chunked into groups of NFT_CHUNK_SIZE to stay within
     netlink buffer limits.
@@ -587,17 +584,21 @@ def write_nft_batch(cfg: Config, v4: List[str], v6: List[str],
             elems = ", ".join(chunk)
             lines.append(f"add element inet {table} {set_name} {{ {elems} }}")
 
-    _add_elements(cfg.nft_set_v4, v4)
-    _add_elements(cfg.nft_set_v6, v6)
+    if v4 is not None:
+        _add_elements(cfg.nft_set_v4, v4)
+    if v6 is not None:
+        _add_elements(cfg.nft_set_v6, v6)
 
+    v4_count = len(v4) if v4 is not None else 0
+    v6_count = len(v6) if v6 is not None else 0
     text = "\n".join(lines) + ("\n" if lines else "")
     if dry_run:
         logger.info("[DRY RUN] Would write nft batch: %s (v4=%d, v6=%d)",
-                    cfg.out_path, len(v4), len(v6))
+                    cfg.out_path, v4_count, v6_count)
     else:
         with open(cfg.out_path, "w", encoding="utf-8") as f:
             f.write(text)
-        logger.info("Wrote nft batch: %s (v4=%d, v6=%d)", cfg.out_path, len(v4), len(v6))
+        logger.info("Wrote nft batch: %s (v4=%d, v6=%d)", cfg.out_path, v4_count, v6_count)
     return text
 
 
@@ -957,8 +958,13 @@ def _resolve_config(args: argparse.Namespace) -> Config:
 
 
 def _fetch_and_optimize(args: argparse.Namespace,
-                        cfg: Config) -> Tuple[List[str], List[str], List]:
-    """Fetch sources, parse, optimize, format. Returns (v4_strs, v6_strs, removed)."""
+                        cfg: Config) -> Tuple[Optional[List[str]], Optional[List[str]], List]:
+    """Fetch sources, parse, optimize, format.
+
+    Returns (v4_strs, v6_strs, removed).  A family value of None means
+    "unmanaged — don't touch the kernel set for this family."  An empty
+    list means "managed but empty — flush the kernel set."
+    """
     raw_networks: List = []
     sources = cfg.blacklists
     total = len(sources) or 1
@@ -966,13 +972,14 @@ def _fetch_and_optimize(args: argparse.Namespace,
     fail_count = 0
     for i, src in enumerate(sources, 1):
         text = fetch_source(src, timeout=cfg.timeout)
-        if not text:
+        if text is None:
             fail_count += 1
             logger.warning("Failed to fetch source: %s", src)
-        for ln in text.splitlines():
-            n = parse_entry(ln)
-            if n:
-                raw_networks.append(n)
+        else:
+            for ln in text.splitlines():
+                n = parse_entry(ln)
+                if n:
+                    raw_networks.append(n)
         if args.progress:
             next_tick = progress_tick(i, total, "Fetching sources",
                                      next_tick, args.progress_interval)
@@ -994,11 +1001,13 @@ def _fetch_and_optimize(args: argparse.Namespace,
 
     kept_t.sort(key=sort_key_tuple)
     v4, v6 = _split_families(kept_t, args.collapse)
+    v4_out: Optional[List[str]] = v4
+    v6_out: Optional[List[str]] = v6
     if args.ipv4_only:
-        v6 = []
+        v6_out = None
     if args.ipv6_only:
-        v4 = []
-    return v4, v6, removed
+        v4_out = None
+    return v4_out, v6_out, removed
 
 
 def _split_families(kept_t: List[Tuple[int, int, int]],
@@ -1027,7 +1036,7 @@ def _split_families(kept_t: List[Tuple[int, int, int]],
 
 
 def _write_output(args: argparse.Namespace, cfg: Config,
-                  v4: List[str], v6: List[str]) -> Tuple[str, str]:
+                  v4: Optional[List[str]], v6: Optional[List[str]]) -> Tuple[str, str]:
     """Write restore/nft batch files. Returns (restore_text, nft_batch_text)."""
     restore_text = ""
     nft_batch_text = ""
@@ -1047,7 +1056,7 @@ def _write_output(args: argparse.Namespace, cfg: Config,
 
 
 def _dual_write_ipset(args: argparse.Namespace, cfg: Config,
-                      v4: List[str], v6: List[str]) -> str:
+                      v4: Optional[List[str]], v6: Optional[List[str]]) -> str:
     """During nft coexistence, also write ipset restore so rollback has fresh data."""
     try:
         subprocess.run(["ipset", "list", "-n", cfg.set_v4],
@@ -1092,7 +1101,7 @@ def _apply_nft(args: argparse.Namespace, cfg: Config,
 
 
 def _apply_ipset(args: argparse.Namespace, cfg: Config,
-                 restore_text: str, v4: List[str], v6: List[str]) -> None:
+                 restore_text: str, v4: Optional[List[str]], v6: Optional[List[str]]) -> None:
     """Apply ipset restore + ensure iptables rules."""
     if not restore_text.strip():
         logger.warning("Nothing to apply (no entries). Skipping ipset restore.")
@@ -1120,7 +1129,7 @@ def _apply_ipset(args: argparse.Namespace, cfg: Config,
 
 
 def _force_create_ipsets(cfg: Config,
-                         v4: List[str], v6: List[str]) -> None:
+                         v4: Optional[List[str]], v6: Optional[List[str]]) -> None:
     """Create ipset sets if they don't exist (--force mode)."""
     for setname, family, entries in [(cfg.set_v4, "inet", v4), (cfg.set_v6, "inet6", v6)]:
         if not entries:
@@ -1138,7 +1147,7 @@ def _force_create_ipsets(cfg: Config,
 
 
 def _ensure_iptables_rules(args: argparse.Namespace, cfg: Config,
-                           v4: List[str], v6: List[str]) -> None:
+                           v4: Optional[List[str]], v6: Optional[List[str]]) -> None:
     """Ensure iptables/ip6tables DROP rules exist for non-empty families."""
     ipt_pos = str(cfg.iptables_pos)
     for entries, cmd, setname in [(v4, "iptables", cfg.set_v4), (v6, "ip6tables", cfg.set_v6)]:
