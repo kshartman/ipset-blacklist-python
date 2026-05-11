@@ -10,8 +10,10 @@ This is a complete rewrite in Python with no code from the original shell script
 - Fetches IP blocklists from URLs or local files
 - Normalizes to CIDRs (/32, /128 for hosts)
 - **Advanced deduplication**: Removes exact duplicates AND covered subnets (O(N·P) algorithm)
-- Generates `ipset restore` files compatible with the original
-- Atomic apply with `--apply` flag using temporary sets and swap
+- **Dual backend**: Native nftables support with auto-detection, plus legacy ipset+iptables
+- Generates `ipset restore` or `nft` batch files
+- Atomic apply with `--apply` flag (ipset swap or nft batch)
+- **Import/export** between ipset and nft formats
 
 ### Major Enhancements Over Original
 - **Smart subnet optimization**: Removes IPs/subnets covered by broader ranges (original only removes exact duplicates)
@@ -23,7 +25,8 @@ This is a complete rewrite in Python with no code from the original shell script
 - **Proper logging**: Configurable verbosity levels instead of just echo
 - **Progress indicators**: Won't flood SSH connections
 - **Configuration validation**: Warns about potential issues
-- **Security**: No shell injection vulnerabilities
+- **Security**: No shell injection vulnerabilities, fail-closed fetch, input validation
+- **nftables migration**: Three-phase migrate/rollback/finalize with dual-write coexistence
 
 ## Drop-in Replacement
 
@@ -35,12 +38,16 @@ The Python script is designed as a **drop-in replacement** for the original shel
 
 # New cron job (just change the script name):
 /usr/local/sbin/update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf
+
+# Or use the drop-in wrapper (same name as original):
+/usr/local/sbin/update-blacklist.sh /etc/ipset-blacklist/ipset-blacklist.conf
 ```
 
 - Reads the **same configuration file** format
-- Produces **compatible ipset restore files**
+- Produces **compatible ipset restore files** (or nft batch files with `--backend nft`)
 - Supports all original config variables (BLACKLISTS, MAXELEM, HASHSIZE, etc.)
 - Adds `--force` flag equivalent to `FORCE=yes` in original
+- Includes `update-blacklist.sh` wrapper for cron jobs that call the original script name
 
 ## Requirements
 
@@ -137,6 +144,12 @@ sudo update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --no-f
 - `--progress` - Show progress bars
 - `--collapse` - Additional CIDR aggregation
 - `--show-removed` - Report what was deduplicated
+- `--allow-partial` - Continue even if >50% of sources fail to fetch
+- `--backend {ipset,nft,auto}` - Force a specific firewall backend
+- `--nft-table` / `--nft-set-v4` / `--nft-set-v6` - Override nft table/set names
+- `--analyze-format {ipset,nft,auto}` - Force parser for `--analyze` input
+- `--import-ipset FILE` - Convert ipset dump to nft batch format
+- `--export-ipset FILE` - Convert nft JSON dump to ipset restore format
 
 ## Cron Setup
 
@@ -175,6 +188,10 @@ Suitable for any system with 1GB+ RAM.
 - Kenneth Shane Hartman ([kshartman](https://github.com/kshartman) @ GitHub, shane@ai.mit.edu)
 - ChatGPT (OpenAI) - Optimization algorithms and initial implementation
 - Claude (Anthropic) - Code improvements and documentation
+
+## Documentation
+
+- `man update_blacklist` — full man page with all options, config keys, and examples (installed by `deploy.sh`)
 
 ## License
 

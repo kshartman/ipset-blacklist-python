@@ -5,14 +5,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run tests
+# Run all tests (150 Python + 22 BATS)
 python3 -m unittest test_update_blacklist -v
+bats test_migrate.bats
 
 # Lint
 pylint update_blacklist.py
-
-# Run all tests
-python3 -m unittest test_update_blacklist -v
 
 # Run a single test class
 python3 -m unittest test_update_blacklist.TestOptimizeFast -v
