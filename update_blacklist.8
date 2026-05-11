@@ -1,7 +1,7 @@
 .\" update_blacklist.8 - man page for Python ipset-blacklist
-.TH UPDATE_BLACKLIST 8 "September 2024" "update_blacklist.py" "System Administration Utilities"
+.TH UPDATE_BLACKLIST 8 "May 2026" "update_blacklist.py 2.0.0" "System Administration Utilities"
 .SH NAME
-update_blacklist \- fetch, optimize, analyze, and apply IP blocklists to ipset/iptables
+update_blacklist \- fetch, optimize, analyze, and apply IP blocklists via ipset or nftables
 .SH SYNOPSIS
 .B update_blacklist.py
 [\fIOPTIONS\fR]
@@ -9,14 +9,19 @@ update_blacklist \- fetch, optimize, analyze, and apply IP blocklists to ipset/i
 .B update_blacklist.py
 is a Python reimplementation and enhancement of the original trick77/ipset-blacklist
 shell script. It fetches one or more IP blocklists, normalizes them, removes duplicates
-and subnets covered by broader prefixes, and generates an \fBipset restore\fR script. With
+and subnets covered by broader prefixes, and generates an \fBipset restore\fR script or
+\fBnft\fR batch file. With
 .BR \-\-apply ,
 it atomically swaps the new sets into the kernel and ensures firewall rules exist.
 .PP
+As of v2.0.0, the script supports both \fBipset+iptables\fR and native \fBnftables\fR
+backends. Auto-detection prefers nft when an nft table with the expected sets exists
+(e.g., during migration coexistence). Use \fB\-\-backend\fR to override.
+.PP
 It also supports an analysis mode (via
 .BR \-\-analyze )
-to process existing \fIipset save\fR dumps or restore files, reporting exact duplicates,
-covered subnets, and optionally emitting a clean CIDR list.
+to process existing \fIipset save\fR dumps, restore files, or \fInft\fR JSON dumps,
+reporting exact duplicates, covered subnets, and optionally emitting a clean CIDR list.
 .PP
 The script understands the original
 .I /etc/ipset-blacklist/ipset-blacklist.conf
@@ -26,8 +31,12 @@ format, including
 .BR HASHSIZE ,
 .BR TIMEOUT ,
 .BR IPSET_BLACKLIST_NAME ,
+.BR IP_BLACKLIST_RESTORE ,
+.BR BACKEND ,
+.BR NFT_TABLE ,
+.BR NFT_SET_V4 ,
 and
-.BR IP_BLACKLIST_RESTORE .
+.BR NFT_SET_V6 .
 IPv4 and IPv6 sets are maintained separately; IPv6 is skipped if there are no v6 entries
 (or when \fB\-\-ipv4\-only\fR is used).
 .SH OPTIONS
@@ -102,6 +111,37 @@ With \fB\-\-format cidr\fR, emits the optimized CIDR list to stdout.
 Output format when emitting lists (for \-\-analyze or normal emit). \fBcidr\fR prints just
 networks/hosts; \fBadd\fR prints "add <cidr>" lines (no set name).
 .TP
+.BR \-\-version
+Show version number and exit.
+.TP
+.BR \-\-backend " " \fI{ipset,nft,auto}\fR
+Force a specific firewall backend. Default is \fBauto\fR, which checks for an existing
+nft table first (preferred during migration coexistence), then falls back to ipset.
+Can also be set via \fBBACKEND\fR in the config file.
+.TP
+.BR \-\-nft\-table " " \fINAME\fR
+nftables table name (default: \fBblacklist\fR). Can also be set via \fBNFT_TABLE\fR in config.
+.TP
+.BR \-\-nft\-set\-v4 " " \fINAME\fR
+nftables IPv4 set name (default: \fBv4\fR). Can also be set via \fBNFT_SET_V4\fR in config.
+.TP
+.BR \-\-nft\-set\-v6 " " \fINAME\fR
+nftables IPv6 set name (default: \fBv6\fR). Can also be set via \fBNFT_SET_V6\fR in config.
+.TP
+.BR \-\-analyze\-format " " \fI{ipset,nft,auto}\fR
+Force the parser for \fB\-\-analyze\fR input. Default is \fBauto\fR, which detects ipset
+or nft JSON format from the first few lines of the file.
+.TP
+.BR \-\-import\-ipset " " \fIFILE\fR
+Convert an ipset dump file to nft batch format and print to stdout.
+.TP
+.BR \-\-export\-ipset " " \fIFILE\fR
+Convert an nft JSON dump (\fBnft \-j list set\fR output) to ipset restore format
+and print to stdout.
+.TP
+.BR \-\-allow\-partial
+Continue even if more than 50% of sources fail to fetch (default: abort).
+.TP
 .BR \-h ", " \-\-help
 Show help summary.
 .SH CONFIGURATION
@@ -133,6 +173,18 @@ Temporary set name for atomic swap operations.
 .TP
 .B FORCE
 Set to "yes" to create ipsets and rules if they don't exist (can be overridden with \-\-force).
+.TP
+.B BACKEND
+Firewall backend: \fBauto\fR (default), \fBipset\fR, or \fBnft\fR.
+.TP
+.B NFT_TABLE
+nftables table name (default: \fBblacklist\fR).
+.TP
+.B NFT_SET_V4
+nftables IPv4 set name (default: \fBv4\fR).
+.TP
+.B NFT_SET_V6
+nftables IPv6 set name (default: \fBv6\fR).
 .SH EXAMPLES
 .SS Basic: write optimized restore file only
 .nf
@@ -211,6 +263,28 @@ awk '
 }
 ' ./removed.log | sort | uniq -c | sort -nr | head -50
 .fi
+.SS Apply using nftables backend
+.nf
+update_blacklist.py \\
+  --conf /etc/ipset-blacklist/ipset-blacklist.conf \\
+  --backend nft --apply --ipv4-only --force
+.fi
+.SS Import ipset dump into nftables
+.nf
+ipset save blacklist > blacklist.dump
+update_blacklist.py --import-ipset blacklist.dump > blacklist.nft
+nft -f blacklist.nft
+.fi
+.SS Export nft set to ipset format
+.nf
+nft -j list set inet blacklist v4 > nft-v4.json
+update_blacklist.py --export-ipset nft-v4.json > blacklist.restore
+.fi
+.SS Analyze an nft JSON dump
+.nf
+nft -j list set inet blacklist v4 > nft-v4.json
+update_blacklist.py --analyze nft-v4.json --analyze-format nft --show-removed
+.fi
 .SS Validate restore file without applying
 .nf
 ipset restore -n < /etc/ipset-blacklist/ip-blacklist.restore
@@ -232,13 +306,18 @@ MAILTO=root
 Default configuration file.
 .TP
 .I /etc/ipset-blacklist/ip-blacklist.restore
-Default output file.
+Default output file (ipset backend).
+.TP
+.I /var/lib/ipset-blacklist/migration-state
+State file written by \fBmigrate-to-nftables.sh\fR during migration.
 .SH EXIT STATUS
-Non\-zero on error (e.g. failed fetch, invalid input, ipset restore failure).
+Non\-zero on error (e.g. failed fetch, invalid input, ipset restore failure, nft apply failure).
 .SH SEE ALSO
 .BR ipset (8),
 .BR iptables (8),
-.BR ip6tables (8)
+.BR ip6tables (8),
+.BR nft (8),
+.BR migrate-to-nftables.sh (8)
 .SH AUTHORS
 Original ipset-blacklist shell script by trick77 (https://github.com/trick77/ipset-blacklist).
 .PP
@@ -274,9 +353,19 @@ Configuration validation with warnings
 No shell injection vulnerabilities
 .IP \(bu 2
 Progress indicators that won't flood SSH connections
+.IP \(bu 2
+Native nftables backend with auto-detection (v2.0.0)
+.IP \(bu 2
+Three-phase migration from ipset to nftables with rollback (v2.0.0)
+.IP \(bu 2
+Import/export between ipset and nft formats (v2.0.0)
+.IP \(bu 2
+Dual-write during migration coexistence (v2.0.0)
 .RE
 .SH COMPATIBILITY
 The Python script is designed as a drop-in replacement for the original shell script.
 It reads the same configuration file format and produces compatible ipset restore files.
 Existing cron jobs and automation should work after changing the script name from
-\fBupdate-blacklist.sh\fR to \fBupdate_blacklist.py\fR.
+\fBupdate-blacklist.sh\fR to \fBupdate_blacklist.py\fR. A drop-in wrapper
+.B update-blacklist.sh
+is provided for cron jobs that invoke the old script name.
