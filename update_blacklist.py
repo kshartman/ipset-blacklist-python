@@ -204,10 +204,15 @@ def sort_key_tuple(t: Tuple[int, int, int]) -> Tuple[int, int, int]:
     vbits, addr, plen = t
     return (0 if vbits == 4 else 1, plen, addr)
 
+def format_net_str(n: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> str:
+    """Format a network: bare address for hosts, CIDR for subnets."""
+    if n.prefixlen == (32 if n.version == 4 else 128):
+        return str(n.network_address)
+    return str(n)
+
 def format_network_tuple(tt: Tuple[int, int, int]) -> str:
     """Format a network tuple for display."""
-    n = tuple_to_net(tt)
-    return str(n) if n.prefixlen not in (32, 128) else str(n.network_address)
+    return format_net_str(tuple_to_net(tt))
 
 def progress_tick(i: int, total: int, label: str, next_tick: int, interval_pct: float) -> int:
     """Update progress bar, return next threshold tick."""
@@ -578,6 +583,39 @@ def write_restore(path: str, set4: str, set6: str, hashsize: int, maxelem: int,
         logger.info("[DRY RUN] Would write restore file: %s (v4=%d, v6=%d)", path, len(v4), len(v6))
     return text
 
+# ---------------- nft batch writer ----------------
+NFT_CHUNK_SIZE = 10000
+
+def write_nft_batch(path: str, table: str, set_v4: str, set_v6: str,
+                    v4: List[str], v6: List[str], dry_run: bool = False) -> str:
+    """Write an nft batch script that flushes and repopulates sets.
+
+    Elements are chunked into groups of NFT_CHUNK_SIZE to stay within
+    netlink buffer limits.
+    """
+    lines: List[str] = []
+
+    def _add_elements(set_name: str, entries: List[str]) -> None:
+        lines.append(f"flush set inet {table} {set_name}")
+        for i in range(0, len(entries), NFT_CHUNK_SIZE):
+            chunk = entries[i:i + NFT_CHUNK_SIZE]
+            elems = ", ".join(chunk)
+            lines.append(f"add element inet {table} {set_name} {{ {elems} }}")
+
+    if v4:
+        _add_elements(set_v4, v4)
+    if v6:
+        _add_elements(set_v6, v6)
+
+    text = "\n".join(lines) + ("\n" if lines else "")
+    if not dry_run:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.info("Wrote nft batch: %s (v4=%d, v6=%d)", path, len(v4), len(v6))
+    else:
+        logger.info("[DRY RUN] Would write nft batch: %s (v4=%d, v6=%d)", path, len(v4), len(v6))
+    return text
+
 # ---------------- Rules ----------------
 def ensure_rule(cmd_check: List[str], cmd_insert: List[str], dry_run: bool = False) -> bool:
     """Idempotently ensure an iptables/ip6tables rule exists.
@@ -705,13 +743,10 @@ def main():
         kept_t.sort(key=sort_key_tuple)
         if args.format == "cidr":
             for t in kept_t:
-                n = tuple_to_net(t)
-                print(str(n.network_address) if n.prefixlen in (32,128) else str(n))
+                print(format_net_str(tuple_to_net(t)))
         else:
             for t in kept_t:
-                n = tuple_to_net(t)
-                s = str(n.network_address) if n.prefixlen in (32,128) else str(n)
-                print(f"add {s}")
+                print(f"add {format_net_str(tuple_to_net(t))}")
         return
 
     # NORMAL FLOW (conf-driven)
@@ -771,16 +806,16 @@ def main():
         nets2.sort(key=sort_key_net)
         for n in nets2:
             if n.version == 4:
-                v4.append(str(n) if n.prefixlen != 32 else str(n.network_address))
+                v4.append(format_net_str(n))
             else:
-                v6.append(str(n) if n.prefixlen != 128 else str(n.network_address))
+                v6.append(format_net_str(n))
     else:
         for t in kept_t:
             n = tuple_to_net(t)
             if n.version == 4:
-                v4.append(str(n) if n.prefixlen != 32 else str(n.network_address))
+                v4.append(format_net_str(n))
             else:
-                v6.append(str(n) if n.prefixlen != 128 else str(n.network_address))
+                v6.append(format_net_str(n))
 
     # Family forcing
     if args.ipv4_only:

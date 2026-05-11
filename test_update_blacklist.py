@@ -14,16 +14,19 @@ from update_blacklist import (
     DEFAULT_NFT_SET_V4,
     DEFAULT_NFT_SET_V6,
     DEFAULT_NFT_TABLE,
+    NFT_CHUNK_SIZE,
     __version__,
     analyze_dumpfile,
     check_nft_table_valid,
     detect_backend,
+    format_net_str,
     is_local_path,
     is_private_ip,
     load_conf,
     optimize_fast,
     parse_addr_token,
     parse_entry,
+    write_nft_batch,
     write_restore,
 )
 
@@ -450,6 +453,69 @@ class TestAnalyzeDumpfile(unittest.TestCase):
         nets, totals = analyze_dumpfile(path)
         self.assertEqual(nets, [])
         self.assertEqual(totals["adds_total"], 0)
+
+
+# ---------------------------------------------------------------------------
+# format_net_str
+# ---------------------------------------------------------------------------
+class TestFormatNetStr(unittest.TestCase):
+
+    def test_ipv4_host(self):
+        self.assertEqual(format_net_str(ipaddress.ip_network("1.2.3.4/32")), "1.2.3.4")
+
+    def test_ipv6_host(self):
+        self.assertEqual(format_net_str(ipaddress.ip_network("::1/128")), "::1")
+
+    def test_ipv4_cidr(self):
+        self.assertEqual(format_net_str(ipaddress.ip_network("10.0.0.0/8")), "10.0.0.0/8")
+
+
+# ---------------------------------------------------------------------------
+# write_nft_batch
+# ---------------------------------------------------------------------------
+class TestWriteNftBatch(unittest.TestCase):
+
+    def test_v4_only(self):
+        with tempfile.NamedTemporaryFile(suffix=".nft", delete=False) as f:
+            path = f.name
+        text = write_nft_batch(path, "blacklist", "v4", "v6", ["1.2.3.4", "10.0.0.0/8"], [], dry_run=True)
+        self.assertIn("flush set inet blacklist v4", text)
+        self.assertIn("add element inet blacklist v4 { 1.2.3.4, 10.0.0.0/8 }", text)
+        self.assertNotIn("v6", text)
+
+    def test_v6_only(self):
+        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", [], ["::1"], dry_run=True)
+        self.assertIn("flush set inet blacklist v6", text)
+        self.assertIn("add element inet blacklist v6 { ::1 }", text)
+        self.assertNotIn("v4", text)
+
+    def test_both_families(self):
+        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6",
+                               ["1.2.3.4"], ["::1"], dry_run=True)
+        self.assertIn("flush set inet blacklist v4", text)
+        self.assertIn("flush set inet blacklist v6", text)
+
+    def test_empty(self):
+        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", [], [], dry_run=True)
+        self.assertEqual(text, "")
+
+    def test_chunking(self):
+        entries = [f"10.0.{i // 256}.{i % 256}" for i in range(NFT_CHUNK_SIZE + 5)]
+        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", entries, [], dry_run=True)
+        add_lines = [l for l in text.splitlines() if l.startswith("add element")]
+        self.assertEqual(len(add_lines), 2)
+
+    def test_exact_chunk_boundary(self):
+        entries = [f"10.0.{i // 256}.{i % 256}" for i in range(NFT_CHUNK_SIZE)]
+        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", entries, [], dry_run=True)
+        add_lines = [l for l in text.splitlines() if l.startswith("add element")]
+        self.assertEqual(len(add_lines), 1)
+
+    def test_custom_table_and_sets(self):
+        text = write_nft_batch("/dev/null", "mytable", "myset4", "myset6",
+                               ["1.1.1.1"], [], dry_run=True)
+        self.assertIn("flush set inet mytable myset4", text)
+        self.assertIn("add element inet mytable myset4 { 1.1.1.1 }", text)
 
 
 # ---------------------------------------------------------------------------
