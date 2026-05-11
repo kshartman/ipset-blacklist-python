@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from update_blacklist import (
+    Config,
     DEFAULT_NFT_SET_V4,
     DEFAULT_NFT_SET_V6,
     DEFAULT_NFT_TABLE,
@@ -284,8 +285,8 @@ class TestLoadConf(unittest.TestCase):
 
     def test_empty_path_returns_defaults(self):
         cfg = load_conf("")
-        self.assertEqual(cfg["BLACKLISTS"], [])
-        self.assertEqual(cfg["SET_NAME4"], "blacklist")
+        self.assertEqual(cfg.blacklists, [])
+        self.assertEqual(cfg.set_v4, "blacklist")
 
     def test_blacklists_parsed(self):
         path = self._write_conf("""\
@@ -295,7 +296,7 @@ class TestLoadConf(unittest.TestCase):
             )
         """)
         cfg = load_conf(path)
-        self.assertEqual(cfg["BLACKLISTS"], [
+        self.assertEqual(cfg.blacklists, [
             "https://example.com/list1.txt",
             "https://example.com/list2.txt",
         ])
@@ -308,7 +309,7 @@ class TestLoadConf(unittest.TestCase):
             )
         """)
         cfg = load_conf(path)
-        self.assertEqual(cfg["BLACKLISTS"], ["https://example.com/list.txt"])
+        self.assertEqual(cfg.blacklists, ["https://example.com/list.txt"])
 
     def test_numeric_keys(self):
         path = self._write_conf("""\
@@ -318,50 +319,50 @@ class TestLoadConf(unittest.TestCase):
             BLACKLISTS=()
         """)
         cfg = load_conf(path)
-        self.assertEqual(cfg["MAXELEM"], 200000)
-        self.assertEqual(cfg["HASHSIZE"], 32768)
-        self.assertEqual(cfg["TIMEOUT"], 60)
+        self.assertEqual(cfg.maxelem, 200000)
+        self.assertEqual(cfg.hashsize, 32768)
+        self.assertEqual(cfg.timeout, 60)
 
     def test_ipset_blacklist_name_sets_both(self):
         path = self._write_conf("IPSET_BLACKLIST_NAME=mylist\nBLACKLISTS=()\n")
         cfg = load_conf(path)
-        self.assertEqual(cfg["SET_NAME4"], "mylist")
-        self.assertEqual(cfg["SET_NAME6"], "mylist6")
+        self.assertEqual(cfg.set_v4, "mylist")
+        self.assertEqual(cfg.set_v6, "mylist6")
 
     def test_explicit_set_names_override(self):
         path = self._write_conf(
             "SET_NAME4=bl4\nSET_NAME6=bl6\nBLACKLISTS=()\n"
         )
         cfg = load_conf(path)
-        self.assertEqual(cfg["SET_NAME4"], "bl4")
-        self.assertEqual(cfg["SET_NAME6"], "bl6")
+        self.assertEqual(cfg.set_v4, "bl4")
+        self.assertEqual(cfg.set_v6, "bl6")
 
     def test_out_path(self):
         path = self._write_conf(
             "IP_BLACKLIST_RESTORE=/tmp/mylist.restore\nBLACKLISTS=()\n"
         )
         cfg = load_conf(path)
-        self.assertEqual(cfg["OUT_PATH"], "/tmp/mylist.restore")
+        self.assertEqual(cfg.out_path, "/tmp/mylist.restore")
 
     def test_force_yes(self):
         path = self._write_conf("FORCE=yes\nBLACKLISTS=()\n")
-        self.assertTrue(load_conf(path)["FORCE"])
+        self.assertTrue(load_conf(path).force)
 
     def test_force_no(self):
         path = self._write_conf("FORCE=no\nBLACKLISTS=()\n")
-        self.assertFalse(load_conf(path)["FORCE"])
+        self.assertFalse(load_conf(path).force)
 
     def test_iptables_rule_number(self):
         path = self._write_conf("IPTABLES_IPSET_RULE_NUMBER=3\nBLACKLISTS=()\n")
-        self.assertEqual(load_conf(path)["IPTABLES_POS"], 3)
+        self.assertEqual(load_conf(path).iptables_pos, 3)
 
     def test_tmp_set_name(self):
         path = self._write_conf(
             "IPSET_TMP_BLACKLIST_NAME=bl-tmp\nBLACKLISTS=()\n"
         )
         cfg = load_conf(path)
-        self.assertEqual(cfg["SET_TMP_NAME4"], "bl-tmp")
-        self.assertEqual(cfg["SET_TMP_NAME6"], "bl-tmp6")
+        self.assertEqual(cfg.set_tmp_v4, "bl-tmp")
+        self.assertEqual(cfg.set_tmp_v6, "bl-tmp6")
 
 
 # ---------------------------------------------------------------------------
@@ -369,43 +370,46 @@ class TestLoadConf(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestWriteRestore(unittest.TestCase):
 
+    def _cfg(self, **overrides):
+        defaults = dict(out_path="/dev/null", set_v4="bl", set_v6="bl6",
+                        hashsize=16384, maxelem=65536)
+        defaults.update(overrides)
+        return Config(**defaults)
+
     def test_v4_only(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             ["1.2.3.4", "5.6.7.0/24"], [], dry_run=True)
+        text = write_restore(self._cfg(), ["1.2.3.4", "5.6.7.0/24"], [],
+                             dry_run=True)
         self.assertIn("create bl hash:net family inet", text)
         self.assertIn("add bl 1.2.3.4", text)
         self.assertIn("add bl 5.6.7.0/24", text)
         self.assertNotIn("bl6", text)
 
     def test_v6_only(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             [], ["2001:db8::/32"], dry_run=True)
+        text = write_restore(self._cfg(), [], ["2001:db8::/32"], dry_run=True)
         self.assertIn("create bl6 hash:net family inet6", text)
         self.assertIn("add bl6 2001:db8::/32", text)
         self.assertNotIn("create bl ", text)
 
     def test_both_families(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             ["1.2.3.4"], ["2001:db8::1"], dry_run=True)
+        text = write_restore(self._cfg(), ["1.2.3.4"], ["2001:db8::1"],
+                             dry_run=True)
         self.assertIn("add bl 1.2.3.4", text)
         self.assertIn("add bl6 2001:db8::1", text)
 
     def test_empty_produces_empty_output(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             [], [], dry_run=True)
+        text = write_restore(self._cfg(), [], [], dry_run=True)
         self.assertEqual(text, "")
 
     def test_atomic_swap_tmp_set(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             ["1.2.3.4"], [], tmp=True, dry_run=True)
+        text = write_restore(self._cfg(), ["1.2.3.4"], [], tmp=True,
+                             dry_run=True)
         self.assertIn("create bl-tmp", text)
         self.assertIn("swap bl-tmp bl", text)
         self.assertIn("destroy bl-tmp", text)
 
     def test_atomic_swap_custom_tmp_name(self):
-        text = write_restore("/dev/null", "bl", "bl6", 16384, 65536,
-                             ["1.2.3.4"], [], tmp=True, dry_run=True,
-                             set4_tmp="my-tmp")
+        text = write_restore(self._cfg(set_tmp_v4="my-tmp"), ["1.2.3.4"], [],
+                             tmp=True, dry_run=True)
         self.assertIn("create my-tmp", text)
         self.assertIn("swap my-tmp bl", text)
 
@@ -556,44 +560,50 @@ class TestFormatNetStr(unittest.TestCase):
 # ---------------------------------------------------------------------------
 class TestWriteNftBatch(unittest.TestCase):
 
+    def _cfg(self, **overrides):
+        defaults = dict(out_path="/dev/null")
+        defaults.update(overrides)
+        return Config(**defaults)
+
     def test_v4_only(self):
         with tempfile.NamedTemporaryFile(suffix=".nft", delete=False) as f:
             path = f.name
-        text = write_nft_batch(path, "blacklist", "v4", "v6", ["1.2.3.4", "10.0.0.0/8"], [], dry_run=True)
+        text = write_nft_batch(self._cfg(out_path=path),
+                               ["1.2.3.4", "10.0.0.0/8"], [], dry_run=True)
         self.assertIn("flush set inet blacklist v4", text)
         self.assertIn("add element inet blacklist v4 { 1.2.3.4, 10.0.0.0/8 }", text)
         self.assertNotIn("v6", text)
 
     def test_v6_only(self):
-        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", [], ["::1"], dry_run=True)
+        text = write_nft_batch(self._cfg(), [], ["::1"], dry_run=True)
         self.assertIn("flush set inet blacklist v6", text)
         self.assertIn("add element inet blacklist v6 { ::1 }", text)
         self.assertNotIn("v4", text)
 
     def test_both_families(self):
-        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6",
-                               ["1.2.3.4"], ["::1"], dry_run=True)
+        text = write_nft_batch(self._cfg(), ["1.2.3.4"], ["::1"], dry_run=True)
         self.assertIn("flush set inet blacklist v4", text)
         self.assertIn("flush set inet blacklist v6", text)
 
     def test_empty(self):
-        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", [], [], dry_run=True)
+        text = write_nft_batch(self._cfg(), [], [], dry_run=True)
         self.assertEqual(text, "")
 
     def test_chunking(self):
         entries = [f"10.0.{i // 256}.{i % 256}" for i in range(NFT_CHUNK_SIZE + 5)]
-        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", entries, [], dry_run=True)
+        text = write_nft_batch(self._cfg(), entries, [], dry_run=True)
         add_lines = [l for l in text.splitlines() if l.startswith("add element")]
         self.assertEqual(len(add_lines), 2)
 
     def test_exact_chunk_boundary(self):
         entries = [f"10.0.{i // 256}.{i % 256}" for i in range(NFT_CHUNK_SIZE)]
-        text = write_nft_batch("/dev/null", "blacklist", "v4", "v6", entries, [], dry_run=True)
+        text = write_nft_batch(self._cfg(), entries, [], dry_run=True)
         add_lines = [l for l in text.splitlines() if l.startswith("add element")]
         self.assertEqual(len(add_lines), 1)
 
     def test_custom_table_and_sets(self):
-        text = write_nft_batch("/dev/null", "mytable", "myset4", "myset6",
+        text = write_nft_batch(self._cfg(nft_table="mytable", nft_set_v4="myset4",
+                                         nft_set_v6="myset6"),
                                ["1.1.1.1"], [], dry_run=True)
         self.assertIn("flush set inet mytable myset4", text)
         self.assertIn("add element inet mytable myset4 { 1.1.1.1 }", text)
@@ -605,7 +615,7 @@ class TestWriteNftBatch(unittest.TestCase):
 class TestSetupNftTableScript(unittest.TestCase):
 
     def test_full_table(self):
-        s = setup_nft_table_script("blacklist", "v4", "v6")
+        s = setup_nft_table_script()
         self.assertIn("table inet blacklist {", s)
         self.assertIn("set v4 {", s)
         self.assertIn("type ipv4_addr", s)
@@ -629,7 +639,9 @@ class TestSetupNftTableScript(unittest.TestCase):
         self.assertIn("ip6 saddr @v6 drop", s)
 
     def test_custom_names(self):
-        s = setup_nft_table_script("mytable", "myset4", "myset6")
+        s = setup_nft_table_script(Config(nft_table="mytable",
+                                          nft_set_v4="myset4",
+                                          nft_set_v6="myset6"))
         self.assertIn("table inet mytable {", s)
         self.assertIn("set myset4 {", s)
         self.assertIn("set myset6 {", s)
@@ -697,34 +709,34 @@ class TestCheckNftTableValid(unittest.TestCase):
 class TestDetectBackend(unittest.TestCase):
 
     def test_force_backend_ipset(self):
-        self.assertEqual(detect_backend(force_backend="ipset"), "ipset")
+        self.assertEqual(detect_backend(Config(backend="ipset")), "ipset")
 
     def test_force_backend_nft(self):
-        self.assertEqual(detect_backend(force_backend="nft"), "nft")
+        self.assertEqual(detect_backend(Config(backend="nft")), "nft")
 
     def test_nft_table_valid_wins(self):
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=True):
-            self.assertEqual(detect_backend(), "nft")
+            self.assertEqual(detect_backend(Config()), "nft")
 
     def test_ipset_exists_fallback(self):
         cp = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"")
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
              mock.patch("update_blacklist.subprocess.run", return_value=cp):
-            self.assertEqual(detect_backend(), "ipset")
+            self.assertEqual(detect_backend(Config()), "ipset")
 
     def test_force_prefers_nft(self):
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
              mock.patch("update_blacklist.subprocess.run",
                         side_effect=subprocess.CalledProcessError(1, "ipset")), \
              mock.patch("update_blacklist.shutil.which", side_effect=lambda x: "/usr/sbin/nft" if x == "nft" else None):
-            self.assertEqual(detect_backend(force=True), "nft")
+            self.assertEqual(detect_backend(Config(force=True)), "nft")
 
     def test_force_falls_back_to_ipset(self):
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
              mock.patch("update_blacklist.subprocess.run",
                         side_effect=subprocess.CalledProcessError(1, "ipset")), \
              mock.patch("update_blacklist.shutil.which", side_effect=lambda x: "/usr/sbin/ipset" if x == "ipset" else None):
-            self.assertEqual(detect_backend(force=True), "ipset")
+            self.assertEqual(detect_backend(Config(force=True)), "ipset")
 
     def test_no_backend_raises(self):
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
@@ -732,12 +744,12 @@ class TestDetectBackend(unittest.TestCase):
                         side_effect=subprocess.CalledProcessError(1, "ipset")), \
              mock.patch("update_blacklist.shutil.which", return_value=None):
             with self.assertRaises(RuntimeError):
-                detect_backend()
+                detect_backend(Config())
 
     def test_nft_preferred_during_coexistence(self):
         """nft wins even when ipset also exists (coexistence window)."""
         with mock.patch("update_blacklist.check_nft_table_valid", return_value=True):
-            self.assertEqual(detect_backend(), "nft")
+            self.assertEqual(detect_backend(Config()), "nft")
 
 
 # ---------------------------------------------------------------------------
@@ -753,23 +765,23 @@ class TestLoadConfNft(unittest.TestCase):
 
     def test_defaults(self):
         cfg = load_conf("")
-        self.assertEqual(cfg["BACKEND"], "auto")
-        self.assertEqual(cfg["NFT_TABLE"], DEFAULT_NFT_TABLE)
-        self.assertEqual(cfg["NFT_SET_V4"], DEFAULT_NFT_SET_V4)
-        self.assertEqual(cfg["NFT_SET_V6"], DEFAULT_NFT_SET_V6)
+        self.assertEqual(cfg.backend, "auto")
+        self.assertEqual(cfg.nft_table, DEFAULT_NFT_TABLE)
+        self.assertEqual(cfg.nft_set_v4, DEFAULT_NFT_SET_V4)
+        self.assertEqual(cfg.nft_set_v6, DEFAULT_NFT_SET_V6)
 
     def test_backend_nft(self):
         cfg = load_conf(self._write_conf(["BACKEND=nft"]))
-        self.assertEqual(cfg["BACKEND"], "nft")
+        self.assertEqual(cfg.backend, "nft")
 
     def test_custom_nft_table(self):
         cfg = load_conf(self._write_conf(["NFT_TABLE=my_blocklist"]))
-        self.assertEqual(cfg["NFT_TABLE"], "my_blocklist")
+        self.assertEqual(cfg.nft_table, "my_blocklist")
 
     def test_custom_nft_sets(self):
         cfg = load_conf(self._write_conf(["NFT_SET_V4=ipv4set", "NFT_SET_V6=ipv6set"]))
-        self.assertEqual(cfg["NFT_SET_V4"], "ipv4set")
-        self.assertEqual(cfg["NFT_SET_V6"], "ipv6set")
+        self.assertEqual(cfg.nft_set_v4, "ipv4set")
+        self.assertEqual(cfg.nft_set_v6, "ipv6set")
 
 
 # ---------------------------------------------------------------------------
