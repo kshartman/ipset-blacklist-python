@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# pylint: disable=line-too-long,too-many-lines
+# pylint: disable=line-too-long,too-many-lines  # single-file by design — no module split
 """
 Python ipset-blacklist with fast final-list optimization + --apply + --analyze.
 
@@ -53,7 +53,7 @@ _NFT_ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,63}$')
 
 
 @dataclasses.dataclass
-class Config:  # pylint: disable=too-many-instance-attributes
+class Config:  # pylint: disable=too-many-instance-attributes  # flat config, no benefit from sub-grouping
     """Typed configuration for the ipset-blacklist pipeline."""
     blacklists: List[str] = dataclasses.field(default_factory=list)
     hashsize: int = DEFAULT_HASHSIZE

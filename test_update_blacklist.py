@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for update_blacklist.py — parsing, dedup, config, restore output."""
 
+import dataclasses
 import email.message
 import ipaddress
 import json
@@ -377,10 +378,10 @@ class TestLoadConf(unittest.TestCase):
 class TestWriteRestore(unittest.TestCase):
 
     def _cfg(self, **overrides: object) -> Config:
-        defaults: dict[str, object] = dict(out_path="/dev/null", set_v4="bl", set_v6="bl6",
-                                           hashsize=16384, maxelem=65536)
-        defaults.update(overrides)
-        return Config(**defaults)  # type: ignore[arg-type]
+        return dataclasses.replace(
+            Config(out_path="/dev/null", set_v4="bl", set_v6="bl6",
+                   hashsize=16384, maxelem=65536),
+            **overrides)
 
     def test_v4_only(self):
         text = write_restore(self._cfg(), ["1.2.3.4", "5.6.7.0/24"], [],
@@ -587,9 +588,7 @@ class TestFormatNetStr(unittest.TestCase):
 class TestWriteNftBatch(unittest.TestCase):
 
     def _cfg(self, **overrides: object) -> Config:
-        defaults: dict[str, object] = dict(out_path="/dev/null")
-        defaults.update(overrides)
-        return Config(**defaults)  # type: ignore[arg-type]
+        return dataclasses.replace(Config(out_path="/dev/null"), **overrides)
 
     def test_v4_only(self):
         with tempfile.NamedTemporaryFile(suffix=".nft", delete=False) as f:
