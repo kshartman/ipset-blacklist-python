@@ -686,6 +686,55 @@ def ensure_rule(cmd_check: List[str], cmd_insert: List[str], dry_run: bool = Fal
             raise RuntimeError(f"Failed to insert rule: {' '.join(cmd_insert)}") from e
 
 # ---------------- Analyze dump ----------------
+def detect_dump_format(path: str) -> str:
+    """Sniff the first ~20 lines to determine if a dump is ipset or nft format."""
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for i, ln in enumerate(f):
+            if i >= 20:
+                break
+            stripped = ln.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("{") or stripped.startswith('"nftables"'):
+                return "nft"
+            if stripped.startswith("add ") or stripped.startswith("create "):
+                return "ipset"
+            if '"set"' in stripped or '"table"' in stripped:
+                return "nft"
+    return "unknown"
+
+
+def parse_nft_dump(path_or_json: str) -> Tuple[List, Dict[str, int]]:
+    """Parse nft JSON output (from nft -j list set or file) into networks + totals."""
+    totals = {"adds_total": 0}
+    nets: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]] = []
+    with open(path_or_json, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        logger.warning("Failed to parse nft JSON from %s", path_or_json)
+        return nets, totals
+
+    for item in data.get("nftables", []):
+        s = item.get("set")
+        if not s:
+            continue
+        for elem in s.get("elem", []):
+            tok = None
+            if isinstance(elem, str):
+                tok = elem
+            elif isinstance(elem, dict) and "prefix" in elem:
+                p = elem["prefix"]
+                tok = f"{p.get('addr', '')}/{p.get('len', '')}"
+            if tok:
+                n = parse_addr_token(tok)
+                if n:
+                    nets.append(n)
+                    totals["adds_total"] += 1
+    return nets, totals
+
+
 def analyze_dumpfile(path: str, sets_filter: Optional[Set[str]] = None) -> Tuple[List, Dict[str, int]]:
     """Parse an ipset save/restore file and return list of networks, plus totals."""
     totals = {"adds_total": 0}
@@ -728,7 +777,8 @@ def main():
     ap.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging.")
     ap.add_argument("--quiet", "-q", action="store_true", help="Suppress non-error output.")
     # Analyze mode
-    ap.add_argument("--analyze", metavar="FILE", help="Analyze an ipset save/restore file for duplicates and covered subnets.")
+    ap.add_argument("--analyze", metavar="FILE", help="Analyze an ipset/nft dump file for duplicates and covered subnets.")
+    ap.add_argument("--analyze-format", choices=["ipset","nft","auto"], default="auto", help="Force analyze parser (default: auto-detect).")
     ap.add_argument("--set", dest="sets", action="append", default=[], help="When using --analyze, limit to this set name (repeatable).")
     ap.add_argument("--format", choices=["add","cidr"], default="add", help="When emitting lists (analyze/normal), choose output format.")
     # nft backend options
@@ -754,8 +804,16 @@ def main():
 
     # ANALYZE MODE
     if args.analyze:
-        sets_filter = set(args.sets) if args.sets else None
-        nets, totals = analyze_dumpfile(args.analyze, sets_filter=sets_filter)
+        dump_fmt = args.analyze_format
+        if dump_fmt == "auto":
+            dump_fmt = detect_dump_format(args.analyze)
+            logger.debug("Auto-detected dump format: %s", dump_fmt)
+
+        if dump_fmt == "nft":
+            nets, totals = parse_nft_dump(args.analyze)
+        else:
+            sets_filter = set(args.sets) if args.sets else None
+            nets, totals = analyze_dumpfile(args.analyze, sets_filter=sets_filter)
         if args.ipv4_only:
             nets = [n for n in nets if n.version == 4]
         if args.ipv6_only:

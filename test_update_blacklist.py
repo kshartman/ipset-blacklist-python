@@ -20,6 +20,7 @@ from update_blacklist import (
     apply_nft_batch,
     check_nft_table_valid,
     detect_backend,
+    detect_dump_format,
     format_net_str,
     is_local_path,
     is_private_ip,
@@ -27,6 +28,7 @@ from update_blacklist import (
     optimize_fast,
     parse_addr_token,
     parse_entry,
+    parse_nft_dump,
     setup_nft_table_script,
     write_nft_batch,
     write_restore,
@@ -453,6 +455,83 @@ class TestAnalyzeDumpfile(unittest.TestCase):
     def test_empty_file(self):
         path = self._write_dump([])
         nets, totals = analyze_dumpfile(path)
+        self.assertEqual(nets, [])
+        self.assertEqual(totals["adds_total"], 0)
+
+
+# ---------------------------------------------------------------------------
+# detect_dump_format
+# ---------------------------------------------------------------------------
+class TestDetectDumpFormat(unittest.TestCase):
+
+    def _write(self, lines):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".dump", delete=False)
+        f.write("\n".join(lines) + "\n")
+        f.close()
+        return f.name
+
+    def test_ipset_format(self):
+        path = self._write(["create blacklist hash:net", "add blacklist 1.2.3.4"])
+        self.assertEqual(detect_dump_format(path), "ipset")
+
+    def test_nft_json_format(self):
+        path = self._write(['{"nftables": [{"set": {"name": "v4"}}]}'])
+        self.assertEqual(detect_dump_format(path), "nft")
+
+    def test_unknown_format(self):
+        path = self._write(["some random text", "more random text"])
+        self.assertEqual(detect_dump_format(path), "unknown")
+
+
+# ---------------------------------------------------------------------------
+# parse_nft_dump
+# ---------------------------------------------------------------------------
+class TestParseNftDump(unittest.TestCase):
+
+    def _write_json(self, data):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        f.write(json.dumps(data))
+        f.close()
+        return f.name
+
+    def test_basic_elements(self):
+        data = {"nftables": [
+            {"set": {"name": "v4", "elem": ["1.2.3.4", "5.6.7.8"]}}
+        ]}
+        nets, totals = parse_nft_dump(self._write_json(data))
+        self.assertEqual(totals["adds_total"], 2)
+        self.assertEqual(len(nets), 2)
+
+    def test_prefix_elements(self):
+        data = {"nftables": [
+            {"set": {"name": "v4", "elem": [
+                {"prefix": {"addr": "10.0.0.0", "len": 8}}
+            ]}}
+        ]}
+        nets, totals = parse_nft_dump(self._write_json(data))
+        self.assertEqual(totals["adds_total"], 1)
+        self.assertEqual(str(nets[0]), "10.0.0.0/8")
+
+    def test_mixed_families(self):
+        data = {"nftables": [
+            {"set": {"name": "v4", "elem": ["1.2.3.4"]}},
+            {"set": {"name": "v6", "elem": ["::1"]}}
+        ]}
+        nets, totals = parse_nft_dump(self._write_json(data))
+        self.assertEqual(totals["adds_total"], 2)
+        versions = {n.version for n in nets}
+        self.assertEqual(versions, {4, 6})
+
+    def test_empty_set(self):
+        data = {"nftables": [{"set": {"name": "v4", "elem": []}}]}
+        nets, totals = parse_nft_dump(self._write_json(data))
+        self.assertEqual(totals["adds_total"], 0)
+
+    def test_malformed_json(self):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        f.write("not json at all")
+        f.close()
+        nets, totals = parse_nft_dump(f.name)
         self.assertEqual(nets, [])
         self.assertEqual(totals["adds_total"], 0)
 
