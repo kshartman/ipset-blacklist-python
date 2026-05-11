@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# pylint: disable=line-too-long
+# pylint: disable=line-too-long,too-many-lines
 # pylint: disable=too-many-locals,too-many-branches,too-many-statements
 # pylint: disable=too-many-arguments
 # The above are disabled because:
@@ -731,6 +731,11 @@ def main():
     ap.add_argument("--analyze", metavar="FILE", help="Analyze an ipset save/restore file for duplicates and covered subnets.")
     ap.add_argument("--set", dest="sets", action="append", default=[], help="When using --analyze, limit to this set name (repeatable).")
     ap.add_argument("--format", choices=["add","cidr"], default="add", help="When emitting lists (analyze/normal), choose output format.")
+    # nft backend options
+    ap.add_argument("--backend", choices=["ipset","nft","auto"], default=None, help="Force backend (default: auto-detect, or config BACKEND).")
+    ap.add_argument("--nft-table", default=None, help="nft table name (default: config or 'blacklist').")
+    ap.add_argument("--nft-set-v4", default=None, help="nft v4 set name (default: config or 'v4').")
+    ap.add_argument("--nft-set-v6", default=None, help="nft v6 set name (default: config or 'v6').")
     args = ap.parse_args()
 
     # Configure logging based on verbosity
@@ -812,6 +817,28 @@ def main():
     ipt_pos = args.iptables_pos if args.iptables_pos is not None else cfg.get("IPTABLES_POS", 1)
     sources = cfg["BLACKLISTS"] + list(args.extra_source)
 
+    # Resolve nft config (CLI overrides > config > defaults)
+    nft_table = args.nft_table or cfg["NFT_TABLE"]
+    nft_set_v4 = args.nft_set_v4 or cfg["NFT_SET_V4"]
+    nft_set_v6 = args.nft_set_v6 or cfg["NFT_SET_V6"]
+    force_backend = args.backend or cfg["BACKEND"]
+
+    # Detect backend only when applying; write-only always uses ipset (D2)
+    # unless --backend nft was explicitly set
+    backend = "ipset"
+    if args.apply or args.force:
+        try:
+            backend = detect_backend(force_backend=force_backend, set_name=set4,
+                                     nft_table=nft_table, nft_set_v4=nft_set_v4,
+                                     nft_set_v6=nft_set_v6, force=args.force)
+        except RuntimeError as e:
+            logger.error(str(e))
+            sys.exit(2)
+        logger.info("Backend: %s", backend)
+    elif force_backend == "nft":
+        backend = "nft"
+        logger.info("Backend: nft (explicit)")
+
     logger.info("Sources: %d", len(sources))
 
     # Fetch & parse
@@ -867,16 +894,41 @@ def main():
     if args.ipv6_only:
         v4 = []
 
-    # Write restore (tmp swap script if --apply)
+    # Write output
     restore_text = ""
+    nft_batch_text = ""
     set4_tmp = cfg.get("SET_TMP_NAME4")
     set6_tmp = cfg.get("SET_TMP_NAME6")
-    if args.apply:
-        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
-                                    tmp=True, dry_run=args.dry_run, set4_tmp=set4_tmp, set6_tmp=set6_tmp)
-    elif not args.no_write:
-        restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
-                                    tmp=False, dry_run=args.dry_run)
+
+    if backend == "nft":
+        if args.apply:
+            nft_batch_text = write_nft_batch(out_path, nft_table, nft_set_v4, nft_set_v6,
+                                             v4, v6, dry_run=args.dry_run)
+        elif not args.no_write:
+            nft_batch_text = write_nft_batch(out_path, nft_table, nft_set_v4, nft_set_v6,
+                                             v4, v6, dry_run=args.dry_run)
+    else:
+        if args.apply:
+            restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
+                                        tmp=True, dry_run=args.dry_run, set4_tmp=set4_tmp, set6_tmp=set6_tmp)
+        elif not args.no_write:
+            restore_text = write_restore(out_path, set4, set6, hashsize, maxelem, v4, v6,
+                                        tmp=False, dry_run=args.dry_run)
+
+    # Dual-write during coexistence (D7): if nft is primary, also write ipset
+    # so rollback always has fresh data
+    if backend == "nft" and args.apply:
+        try:
+            subprocess.run(["ipset", "list", "-n", set4],
+                           capture_output=True, timeout=10, check=True)
+            ipset_coexist = True
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+            ipset_coexist = False
+        if ipset_coexist:
+            logger.info("Dual-write: updating ipset (coexistence mode)")
+            restore_text = write_restore(out_path + ".ipset", set4, set6, hashsize, maxelem,
+                                         v4, v6, tmp=True, dry_run=args.dry_run,
+                                         set4_tmp=set4_tmp, set6_tmp=set6_tmp)
 
     # Removed report (if requested)
     if args.show_removed:
@@ -897,59 +949,91 @@ def main():
 
     # Progress already logged in write_restore function
 
-    # Apply to kernel (atomic) + ensure rules
+    # Apply to kernel
     if args.apply:
-        if not restore_text.strip():
-            logger.warning("Nothing to apply (no entries). Skipping ipset restore.")
-            return
+        if backend == "nft":
+            if not nft_batch_text.strip():
+                logger.warning("Nothing to apply (no entries). Skipping nft apply.")
+                return
 
-        # Check if sets exist, create if --force
-        if not args.dry_run and args.force:
-            for setname, family in [(set4, "inet"), (set6, "inet6")]:
-                if (setname == set4 and not v4) or (setname == set6 and not v6):
-                    continue
-                try:
-                    subprocess.run(["ipset", "list", "-n", setname],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
-                except subprocess.CalledProcessError:
-                    logger.info("Creating ipset %s (--force mode)", setname)
-                    subprocess.run(["ipset", "create", setname, DEFAULT_HASH_V4 if family == "inet" else DEFAULT_HASH_V6,
-                                  "family", family, "hashsize", str(hashsize), "maxelem", str(maxelem)],
-                                 check=False)
+            # Create table/sets if --force and table doesn't exist yet
+            if args.force and not check_nft_table_valid(nft_table, nft_set_v4, nft_set_v6):
+                setup_script = setup_nft_table_script(nft_table, nft_set_v4, nft_set_v6,
+                                                      ipv4_only=args.ipv4_only, ipv6_only=args.ipv6_only)
+                logger.info("Creating nft table %s (--force mode)", nft_table)
+                apply_nft_batch(setup_script, dry_run=args.dry_run)
 
-        if args.dry_run:
-            logger.info("[DRY RUN] Would apply ipset restore with %d lines", len(restore_text.splitlines()))
+            apply_nft_batch(nft_batch_text, dry_run=args.dry_run)
+
+            # Dual-write: also apply ipset restore if coexisting
+            if restore_text.strip():
+                if args.dry_run:
+                    logger.info("[DRY RUN] Would apply ipset restore (dual-write, %d lines)",
+                                len(restore_text.splitlines()))
+                else:
+                    try:
+                        subprocess.run(["ipset", "restore"], input=restore_text.encode("utf-8"),
+                                       capture_output=True, check=True, timeout=30)
+                        logger.info("Dual-write: applied ipset restore")
+                    except subprocess.CalledProcessError as e:
+                        logger.warning("Dual-write ipset restore failed (non-fatal): %s",
+                                       e.stderr.decode("utf-8", "ignore").strip())
+
         else:
-            try:
-                subprocess.run(["ipset", "restore"], input=restore_text.encode("utf-8"),
-                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30)
-                logger.info("Successfully applied ipset restore")
-            except subprocess.CalledProcessError as e:
-                logger.error("ipset restore failed:\n%s", e.stderr.decode("utf-8", "ignore"))
-                if not args.force:
-                    logger.error("Hint: Use --force to create missing ipsets")
-                sys.exit(2)
+            # ipset backend
+            if not restore_text.strip():
+                logger.warning("Nothing to apply (no entries). Skipping ipset restore.")
+                return
 
-        # Only ensure rules for non-empty families
-        if v4:
-            v4_check = ["iptables", "-C", "INPUT", "-m", "set", "--match-set", set4, "src", "-j", "DROP"]
-            v4_insert = ["iptables", "-I", "INPUT", str(ipt_pos), "-m", "set", "--match-set", set4, "src", "-j", "DROP"]
-            try:
-                existed = ensure_rule(v4_check, v4_insert, dry_run=args.dry_run)
-                if not args.dry_run:
-                    logger.info("IPv4 rule %s", "already exists" if existed else "inserted")
-            except RuntimeError as e:
-                logger.error(str(e))
+            # Check if sets exist, create if --force
+            if not args.dry_run and args.force:
+                for setname, family in [(set4, "inet"), (set6, "inet6")]:
+                    if (setname == set4 and not v4) or (setname == set6 and not v6):
+                        continue
+                    try:
+                        subprocess.run(["ipset", "list", "-n", setname],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+                    except subprocess.CalledProcessError:
+                        logger.info("Creating ipset %s (--force mode)", setname)
+                        subprocess.run(["ipset", "create", setname,
+                                       DEFAULT_HASH_V4 if family == "inet" else DEFAULT_HASH_V6,
+                                       "family", family, "hashsize", str(hashsize),
+                                       "maxelem", str(maxelem)], check=False)
 
-        if v6:
-            v6_check = ["ip6tables", "-C", "INPUT", "-m", "set", "--match-set", set6, "src", "-j", "DROP"]
-            v6_insert = ["ip6tables", "-I", "INPUT", str(ipt_pos), "-m", "set", "--match-set", set6, "src", "-j", "DROP"]
-            try:
-                existed = ensure_rule(v6_check, v6_insert, dry_run=args.dry_run)
-                if not args.dry_run:
-                    logger.info("IPv6 rule %s", "already exists" if existed else "inserted")
-            except RuntimeError as e:
-                logger.error(str(e))
+            if args.dry_run:
+                logger.info("[DRY RUN] Would apply ipset restore with %d lines",
+                            len(restore_text.splitlines()))
+            else:
+                try:
+                    subprocess.run(["ipset", "restore"], input=restore_text.encode("utf-8"),
+                                   capture_output=True, check=True, timeout=30)
+                    logger.info("Successfully applied ipset restore")
+                except subprocess.CalledProcessError as e:
+                    logger.error("ipset restore failed:\n%s", e.stderr.decode("utf-8", "ignore"))
+                    if not args.force:
+                        logger.error("Hint: Use --force to create missing ipsets")
+                    sys.exit(2)
+
+            # Only ensure iptables rules for non-empty families
+            if v4:
+                v4_check = ["iptables", "-C", "INPUT", "-m", "set", "--match-set", set4, "src", "-j", "DROP"]
+                v4_insert = ["iptables", "-I", "INPUT", str(ipt_pos), "-m", "set", "--match-set", set4, "src", "-j", "DROP"]
+                try:
+                    existed = ensure_rule(v4_check, v4_insert, dry_run=args.dry_run)
+                    if not args.dry_run:
+                        logger.info("IPv4 rule %s", "already exists" if existed else "inserted")
+                except RuntimeError as e:
+                    logger.error(str(e))
+
+            if v6:
+                v6_check = ["ip6tables", "-C", "INPUT", "-m", "set", "--match-set", set6, "src", "-j", "DROP"]
+                v6_insert = ["ip6tables", "-I", "INPUT", str(ipt_pos), "-m", "set", "--match-set", set6, "src", "-j", "DROP"]
+                try:
+                    existed = ensure_rule(v6_check, v6_insert, dry_run=args.dry_run)
+                    if not args.dry_run:
+                        logger.info("IPv6 rule %s", "already exists" if existed else "inserted")
+                except RuntimeError as e:
+                    logger.error(str(e))
 
     logger.info("Done.")
 

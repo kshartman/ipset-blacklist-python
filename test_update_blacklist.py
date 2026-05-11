@@ -694,6 +694,84 @@ class TestLoadConfNft(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# main() nft integration
+# ---------------------------------------------------------------------------
+class TestMainNftIntegration(unittest.TestCase):
+    """Test that main() routes correctly between ipset and nft backends."""
+
+    def _make_conf(self, extra=""):
+        """Write a minimal conf with one local source."""
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".list", delete=False)
+        src.write("1.2.3.4\n10.0.0.0/8\n")
+        src.close()
+        conf = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
+        conf.write(f'BLACKLISTS=(\n"{src.name}"\n)\n{extra}\n')
+        conf.close()
+        return conf.name
+
+    @mock.patch("update_blacklist.detect_backend", return_value="nft")
+    @mock.patch("update_blacklist.apply_nft_batch")
+    @mock.patch("update_blacklist.check_nft_table_valid", return_value=True)
+    def test_apply_nft_calls_apply_nft_batch(self, _chk, mock_apply, _det):
+        conf = self._make_conf()
+        out = tempfile.NamedTemporaryFile(suffix=".nft", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--conf", conf, "--out", out.name,
+                                              "--apply", "--quiet", "--ipv4-only"]):
+            from update_blacklist import main
+            main()
+        self.assertTrue(mock_apply.called)
+
+    @mock.patch("update_blacklist.detect_backend", return_value="ipset")
+    @mock.patch("update_blacklist.subprocess.run")
+    def test_apply_ipset_calls_ipset_restore(self, mock_run, _det):
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        conf = self._make_conf()
+        out = tempfile.NamedTemporaryFile(suffix=".restore", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--conf", conf, "--out", out.name,
+                                              "--apply", "--quiet", "--ipv4-only"]):
+            from update_blacklist import main
+            main()
+        restore_calls = [c for c in mock_run.call_args_list
+                         if c[0][0][:2] == ["ipset", "restore"]]
+        self.assertTrue(len(restore_calls) > 0)
+
+    def test_write_only_emits_ipset_even_when_nft_detected(self):
+        """D5: write-only mode always emits ipset format unless --backend nft explicit."""
+        conf = self._make_conf()
+        out = tempfile.NamedTemporaryFile(suffix=".restore", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--conf", conf, "--out", out.name,
+                                              "--quiet", "--ipv4-only"]):
+            from update_blacklist import main
+            main()
+        with open(out.name, "r") as f:
+            content = f.read()
+        self.assertIn("create blacklist", content)
+        self.assertIn("add blacklist", content)
+        self.assertNotIn("flush set inet", content)
+
+    def test_write_only_explicit_nft_emits_nft(self):
+        """--backend nft in write-only mode should emit nft format."""
+        conf = self._make_conf()
+        out = tempfile.NamedTemporaryFile(suffix=".nft", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--conf", conf, "--out", out.name,
+                                              "--backend", "nft", "--quiet", "--ipv4-only"]):
+            from update_blacklist import main
+            main()
+        with open(out.name, "r") as f:
+            content = f.read()
+        self.assertIn("flush set inet", content)
+        self.assertIn("add element inet", content)
+
+
+# ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
 class TestVersion(unittest.TestCase):
