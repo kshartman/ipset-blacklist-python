@@ -11,6 +11,15 @@ python3 -m unittest test_update_blacklist -v
 # Lint
 pylint update_blacklist.py
 
+# Run all tests
+python3 -m unittest test_update_blacklist -v
+
+# Run a single test class
+python3 -m unittest test_update_blacklist.TestOptimizeFast -v
+
+# Run a single test method
+python3 -m unittest test_update_blacklist.TestOptimizeFast.test_covered_subnet_removed -v
+
 # Test dry run (requires root + installed ipset/iptables)
 sudo python3 update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --dry-run --verbose
 
@@ -21,9 +30,18 @@ sudo python3 update_blacklist.py --analyze blacklist.dump --set blacklist --show
 sudo ./deploy.sh
 ```
 
+## Dev Setup
+
+```bash
+# Activate pre-commit hook (runs tests before each commit)
+git config core.hooksPath .githooks
+```
+
 ## Architecture
 
-Single-file Python script (`update_blacklist.py`) with no third-party dependencies. Two operating modes:
+Single-file Python script (`update_blacklist.py`) with no third-party dependencies. Python 3.7+, stdlib only. Tests in `test_update_blacklist.py` using `unittest`.
+
+Two operating modes:
 
 **Update mode** (default): Fetches IP blocklists → parses/normalizes → deduplicates → writes ipset restore file → optionally applies atomically via `ipset swap`.
 
@@ -31,12 +49,16 @@ Single-file Python script (`update_blacklist.py`) with no third-party dependenci
 
 ### Key pipeline stages (update mode)
 
-1. **Config parsing** — reads bash-style `BLACKLISTS=(...)` conf via regex (not `bash -c`)
+1. **Config parsing** (`load_conf`) — reads bash-style `BLACKLISTS=(...)` conf via regex (not `bash -c`)
 2. **Fetch** (`fetch_source`) — HTTP/HTTPS with 3-attempt exponential backoff; local `file://` paths
-3. **Parse** (`parse_entry`) — handles raw IPs, CIDRs, `add <set> <addr>` lines; normalizes hosts to /32 or /128
-4. **Dedup** (`remove_covered`) — O(N·P) algorithm: for each prefix length P (sorted shortest to longest), removes any network covered by a broader range already in the set; P ≤ 32 for v4, ≤ 128 for v6
-5. **Write** — emits `ipset restore`-compatible format with `create` + `add` lines
+3. **Parse** (`parse_entry` / `parse_addr_token`) — handles raw IPs, CIDRs, `add <set> <addr>` lines; normalizes hosts to /32 or /128
+4. **Dedup** (`optimize_fast`) — O(N·P) algorithm: for each prefix length P (sorted shortest to longest), removes any network covered by a broader range already in the set; P ≤ 32 for v4, ≤ 128 for v6. Also filters private IPs via `is_private_ip`.
+5. **Write** (`write_restore`) — emits `ipset restore`-compatible format with `create` + `add` lines
 6. **Apply** (`--apply`) — uses a `-tmp` set name, `ipset restore`, `ipset swap`, then `ipset destroy` on the old set; ensures `iptables`/`ip6tables` `INPUT -m set --match-set` rules exist
+
+### Public API (imported by tests)
+
+`analyze_dumpfile`, `is_private_ip`, `load_conf`, `optimize_fast`, `parse_addr_token`, `parse_entry`, `write_restore`, `tuple_to_net`
 
 ### IPv4/IPv6 split
 
@@ -70,3 +92,7 @@ Config lives at `/etc/ipset-blacklist/ipset-blacklist.conf` on each host. Change
 ### Private IP filtering
 
 `PRIVATE_NETWORKS` constant lists RFC1918, loopback, link-local, multicast, and IPv6 equivalents. Applied after parsing, before dedup. Disable with `--no-filter-private`.
+
+### Planned: nftables migration
+
+See `NFTABLES_MIGRATION.md`. Auto-detect backend (`--backend {ipset,nft,auto}`), prefer continuity over novelty (keep ipset if existing set found). New functions: `detect_backend`, `write_nft_batch`, `apply_nft_batch`, etc.

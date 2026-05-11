@@ -25,18 +25,20 @@ TODO: Migrate to nftables backend with auto-detection (see NFTABLES_MIGRATION.md
 
 import argparse
 import ipaddress
+import json
 import logging
 import re
-import sys
-
-__version__ = "dev"
-import time
-import urllib.request
-import urllib.error
+import shutil
 import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, List, Tuple, Dict, Set, Optional, Union
 from urllib.parse import urlparse
+
+__version__ = "dev"
 
 # ---------------- Defaults ----------------
 DEFAULT_SET_V4   = "blacklist"
@@ -50,6 +52,9 @@ DEFAULT_PROGRESS_INTERVAL = 0.5  # percent
 DEFAULT_OUT_PATH = "/etc/ipset-blacklist/ip-blacklist.restore"
 DEFAULT_MAX_RETRIES = 2  # Total of 3 attempts
 DEFAULT_RETRY_DELAYS = [1, 4]  # Exponential backoff in seconds
+DEFAULT_NFT_TABLE   = "blacklist"
+DEFAULT_NFT_SET_V4  = "v4"
+DEFAULT_NFT_SET_V6  = "v6"
 
 # Private IP ranges to filter by default (RFC 1918, loopback, etc.)
 PRIVATE_NETWORKS_V4: List[ipaddress.IPv4Network] = [
@@ -80,6 +85,7 @@ COMMENT          = re.compile(r'^\s*[#;]')
 
 # ---------------- Helpers ----------------
 def is_local_path(s: str) -> bool:
+    """Return True if s is a local filesystem path (not an http/https URL)."""
     if not s:
         return False
     if "://" not in s:
@@ -102,7 +108,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-        except Exception as e:
+        except OSError as e:
             logger.debug("Failed to read file %s: %s", src, e)
             return ""
 
@@ -131,8 +137,7 @@ def fetch_source(src: str, timeout: int, max_retries: int = DEFAULT_MAX_RETRIES)
             # Other URLErrors (network issues) are retryable
             last_error = e
 
-        except (OSError, Exception) as e:
-            # Network/timeout errors are retryable
+        except OSError as e:
             last_error = e
 
         # Retry logic for retryable errors
@@ -170,17 +175,19 @@ def parse_entry(line: str) -> Optional[Union[ipaddress.IPv4Network, ipaddress.IP
     return parse_addr_token(tok)
 
 def mask_for(prefixlen: int, vbits: int) -> int:
+    """Return an integer bitmask for the given prefix length."""
     if prefixlen == 0:
         return 0
     return ((1 << vbits) - 1) ^ ((1 << (vbits - prefixlen)) - 1)
 
 def net_to_tuple(n: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Tuple[int, int, int]:
+    """Convert a network object to a (version, addr_int, prefixlen) tuple."""
     if isinstance(n, ipaddress.IPv4Network):
         return (4, int(n.network_address), n.prefixlen)
-    else:
-        return (6, int(n.network_address), n.prefixlen)
+    return (6, int(n.network_address), n.prefixlen)
 
 def tuple_to_net(t: Tuple[int, int, int]) -> Union[ipaddress.IPv4Network, ipaddress.IPv6Network]:
+    """Convert a (version, addr_int, prefixlen) tuple back to a network object."""
     vbits, addr, plen = t
     if vbits == 4:
         ip = ipaddress.IPv4Address(addr)
@@ -189,9 +196,11 @@ def tuple_to_net(t: Tuple[int, int, int]) -> Union[ipaddress.IPv4Network, ipaddr
     return ipaddress.ip_network(f"{ip}/{plen}", strict=False)
 
 def sort_key_net(n: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]) -> Tuple[int, int, int]:
+    """Sort key for network objects: v4 before v6, then by address and prefix."""
     return (0 if n.version == 4 else 1, int(n.network_address), n.prefixlen)
 
 def sort_key_tuple(t: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """Sort key for network tuples: v4 before v6, then by prefix and address."""
     vbits, addr, plen = t
     return (0 if vbits == 4 else 1, plen, addr)
 
@@ -201,6 +210,7 @@ def format_network_tuple(tt: Tuple[int, int, int]) -> str:
     return str(n) if n.prefixlen not in (32, 128) else str(n.network_address)
 
 def progress_tick(i: int, total: int, label: str, next_tick: int, interval_pct: float) -> int:
+    """Update progress bar, return next threshold tick."""
     if total <= 0:
         return next_tick
     pct = int(i * 100 / total)
@@ -338,6 +348,69 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
 
     return warnings
 
+# ---------------- nft backend detection ----------------
+def check_nft_table_valid(table: str = DEFAULT_NFT_TABLE,
+                          set_v4: str = DEFAULT_NFT_SET_V4,
+                          set_v6: str = DEFAULT_NFT_SET_V6) -> bool:
+    """Check if nft table exists AND contains expected sets via JSON API."""
+    try:
+        result = subprocess.run(
+            ["nft", "-j", "list", "table", "inet", table],
+            capture_output=True, timeout=10, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    expected = {set_v4, set_v6}
+    found: Set[str] = set()
+    for item in data.get("nftables", []):
+        s = item.get("set")
+        if s and s.get("name") in expected:
+            found.add(s["name"])
+    return expected.issubset(found)
+
+
+def detect_backend(force_backend: str = "auto",
+                   set_name: str = DEFAULT_SET_V4,
+                   nft_table: str = DEFAULT_NFT_TABLE,
+                   nft_set_v4: str = DEFAULT_NFT_SET_V4,
+                   nft_set_v6: str = DEFAULT_NFT_SET_V6,
+                   force: bool = False) -> str:
+    """Detect which firewall backend to use.
+
+    Priority:
+      0. force_backend != "auto" → return it
+      1. nft table exists with expected sets → "nft"
+      2. ipset set exists → "ipset"
+      3. --force + nft binary → "nft"
+      4. --force + ipset binary → "ipset"
+      5. error
+    """
+    if force_backend != "auto":
+        return force_backend
+
+    if check_nft_table_valid(nft_table, nft_set_v4, nft_set_v6):
+        return "nft"
+
+    try:
+        subprocess.run(["ipset", "list", "-n", set_name],
+                       capture_output=True, timeout=10, check=True)
+        return "ipset"
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    if force:
+        if shutil.which("nft"):
+            return "nft"
+        if shutil.which("ipset"):
+            return "ipset"
+
+    raise RuntimeError("No supported firewall backend found. "
+                       "Install nft or ipset, or use --force to create a new backend.")
+
+
 def load_conf(path: str) -> Dict[str, Any]:
     """
     Recognized:
@@ -349,6 +422,8 @@ def load_conf(path: str) -> Dict[str, Any]:
       SET_NAME4=, SET_NAME6=
       IPTABLES_IPSET_RULE_NUMBER=
       FORCE= (yes/no)
+      BACKEND= (auto/ipset/nft)
+      NFT_TABLE=, NFT_SET_V4=, NFT_SET_V6=
     """
     cfg = {
         "BLACKLISTS": [],
@@ -362,6 +437,10 @@ def load_conf(path: str) -> Dict[str, Any]:
         "OUT_PATH": DEFAULT_OUT_PATH,
         "IPTABLES_POS": 1,
         "FORCE": False,
+        "BACKEND": "auto",
+        "NFT_TABLE": DEFAULT_NFT_TABLE,
+        "NFT_SET_V4": DEFAULT_NFT_SET_V4,
+        "NFT_SET_V6": DEFAULT_NFT_SET_V6,
     }
     if not path:
         return cfg
@@ -386,7 +465,7 @@ def load_conf(path: str) -> Dict[str, Any]:
                     cfg["BLACKLISTS"].append(v.strip())
 
     for k in ("HASHSIZE","MAXELEM","TIMEOUT"):
-        m = re.search(r'^\s*%s\s*=\s*([0-9]+)\s*$' % k, text, re.M)
+        m = re.search(rf'^\s*{k}\s*=\s*([0-9]+)\s*$', text, re.M)
         if m:
             cfg[k] = int(m.group(1))
 
@@ -424,6 +503,20 @@ def load_conf(path: str) -> Dict[str, Any]:
     m = re.search(r'^\s*FORCE\s*=\s*(yes|no)\s*$', text, re.M)
     if m:
         cfg["FORCE"] = m.group(1).lower() == "yes"
+
+    # nft backend config
+    m = re.search(r'^\s*BACKEND\s*=\s*(auto|ipset|nft)\s*$', text, re.M)
+    if m:
+        cfg["BACKEND"] = m.group(1)
+    m = re.search(r'^\s*NFT_TABLE\s*=\s*([A-Za-z0-9_-]+)\s*$', text, re.M)
+    if m:
+        cfg["NFT_TABLE"] = m.group(1)
+    m = re.search(r'^\s*NFT_SET_V4\s*=\s*([A-Za-z0-9_-]+)\s*$', text, re.M)
+    if m:
+        cfg["NFT_SET_V4"] = m.group(1)
+    m = re.search(r'^\s*NFT_SET_V6\s*=\s*([A-Za-z0-9_-]+)\s*$', text, re.M)
+    if m:
+        cfg["NFT_SET_V6"] = m.group(1)
 
     return cfg
 

@@ -2,13 +2,22 @@
 """Unit tests for update_blacklist.py — parsing, dedup, config, restore output."""
 
 import ipaddress
+import json
+import subprocess
 import tempfile
 import textwrap
 import unittest
 
+from unittest import mock
+
 from update_blacklist import (
+    DEFAULT_NFT_SET_V4,
+    DEFAULT_NFT_SET_V6,
+    DEFAULT_NFT_TABLE,
     __version__,
     analyze_dumpfile,
+    check_nft_table_valid,
+    detect_backend,
     is_local_path,
     is_private_ip,
     load_conf,
@@ -441,6 +450,117 @@ class TestAnalyzeDumpfile(unittest.TestCase):
         nets, totals = analyze_dumpfile(path)
         self.assertEqual(nets, [])
         self.assertEqual(totals["adds_total"], 0)
+
+
+# ---------------------------------------------------------------------------
+# check_nft_table_valid
+# ---------------------------------------------------------------------------
+class TestCheckNftTableValid(unittest.TestCase):
+
+    def _nft_json(self, sets):
+        """Build nft -j output with given set names."""
+        items = [{"metainfo": {"json_schema_version": 1}}]
+        items.append({"table": {"family": "inet", "name": "blacklist"}})
+        for s in sets:
+            items.append({"set": {"family": "inet", "name": s, "table": "blacklist",
+                                  "type": "ipv4_addr", "flags": ["interval"]}})
+        return json.dumps({"nftables": items}).encode()
+
+    def test_valid_table(self):
+        cp = subprocess.CompletedProcess(args=[], returncode=0, stdout=self._nft_json(["v4", "v6"]))
+        with mock.patch("update_blacklist.subprocess.run", return_value=cp):
+            self.assertTrue(check_nft_table_valid())
+
+    def test_missing_set(self):
+        cp = subprocess.CompletedProcess(args=[], returncode=0, stdout=self._nft_json(["v4"]))
+        with mock.patch("update_blacklist.subprocess.run", return_value=cp):
+            self.assertFalse(check_nft_table_valid())
+
+    def test_table_not_found(self):
+        with mock.patch("update_blacklist.subprocess.run",
+                        side_effect=subprocess.CalledProcessError(1, "nft")):
+            self.assertFalse(check_nft_table_valid())
+
+
+# ---------------------------------------------------------------------------
+# detect_backend
+# ---------------------------------------------------------------------------
+class TestDetectBackend(unittest.TestCase):
+
+    def test_force_backend_ipset(self):
+        self.assertEqual(detect_backend(force_backend="ipset"), "ipset")
+
+    def test_force_backend_nft(self):
+        self.assertEqual(detect_backend(force_backend="nft"), "nft")
+
+    def test_nft_table_valid_wins(self):
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=True):
+            self.assertEqual(detect_backend(), "nft")
+
+    def test_ipset_exists_fallback(self):
+        cp = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"")
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
+             mock.patch("update_blacklist.subprocess.run", return_value=cp):
+            self.assertEqual(detect_backend(), "ipset")
+
+    def test_force_prefers_nft(self):
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
+             mock.patch("update_blacklist.subprocess.run",
+                        side_effect=subprocess.CalledProcessError(1, "ipset")), \
+             mock.patch("update_blacklist.shutil.which", side_effect=lambda x: "/usr/sbin/nft" if x == "nft" else None):
+            self.assertEqual(detect_backend(force=True), "nft")
+
+    def test_force_falls_back_to_ipset(self):
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
+             mock.patch("update_blacklist.subprocess.run",
+                        side_effect=subprocess.CalledProcessError(1, "ipset")), \
+             mock.patch("update_blacklist.shutil.which", side_effect=lambda x: "/usr/sbin/ipset" if x == "ipset" else None):
+            self.assertEqual(detect_backend(force=True), "ipset")
+
+    def test_no_backend_raises(self):
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=False), \
+             mock.patch("update_blacklist.subprocess.run",
+                        side_effect=subprocess.CalledProcessError(1, "ipset")), \
+             mock.patch("update_blacklist.shutil.which", return_value=None):
+            with self.assertRaises(RuntimeError):
+                detect_backend()
+
+    def test_nft_preferred_during_coexistence(self):
+        """nft wins even when ipset also exists (coexistence window)."""
+        with mock.patch("update_blacklist.check_nft_table_valid", return_value=True):
+            self.assertEqual(detect_backend(), "nft")
+
+
+# ---------------------------------------------------------------------------
+# load_conf nft keys
+# ---------------------------------------------------------------------------
+class TestLoadConfNft(unittest.TestCase):
+
+    def _write_conf(self, lines):
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
+        f.write("\n".join(lines) + "\n")
+        f.close()
+        return f.name
+
+    def test_defaults(self):
+        cfg = load_conf("")
+        self.assertEqual(cfg["BACKEND"], "auto")
+        self.assertEqual(cfg["NFT_TABLE"], DEFAULT_NFT_TABLE)
+        self.assertEqual(cfg["NFT_SET_V4"], DEFAULT_NFT_SET_V4)
+        self.assertEqual(cfg["NFT_SET_V6"], DEFAULT_NFT_SET_V6)
+
+    def test_backend_nft(self):
+        cfg = load_conf(self._write_conf(["BACKEND=nft"]))
+        self.assertEqual(cfg["BACKEND"], "nft")
+
+    def test_custom_nft_table(self):
+        cfg = load_conf(self._write_conf(["NFT_TABLE=my_blocklist"]))
+        self.assertEqual(cfg["NFT_TABLE"], "my_blocklist")
+
+    def test_custom_nft_sets(self):
+        cfg = load_conf(self._write_conf(["NFT_SET_V4=ipv4set", "NFT_SET_V6=ipv6set"]))
+        self.assertEqual(cfg["NFT_SET_V4"], "ipv4set")
+        self.assertEqual(cfg["NFT_SET_V6"], "ipv6set")
 
 
 # ---------------------------------------------------------------------------
