@@ -68,8 +68,8 @@ Thumbs.db
 # gstack
 .gstack/
 
-# Local scripts (not tracked)
-scripts.local/
+# GeoIP blocker (separate repo)
+geoblockip/
 
 # Project specific
 *.dump
