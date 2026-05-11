@@ -17,6 +17,7 @@ from update_blacklist import (
     NFT_CHUNK_SIZE,
     __version__,
     analyze_dumpfile,
+    apply_nft_batch,
     check_nft_table_valid,
     detect_backend,
     format_net_str,
@@ -26,6 +27,7 @@ from update_blacklist import (
     optimize_fast,
     parse_addr_token,
     parse_entry,
+    setup_nft_table_script,
     write_nft_batch,
     write_restore,
 )
@@ -516,6 +518,68 @@ class TestWriteNftBatch(unittest.TestCase):
                                ["1.1.1.1"], [], dry_run=True)
         self.assertIn("flush set inet mytable myset4", text)
         self.assertIn("add element inet mytable myset4 { 1.1.1.1 }", text)
+
+
+# ---------------------------------------------------------------------------
+# setup_nft_table_script
+# ---------------------------------------------------------------------------
+class TestSetupNftTableScript(unittest.TestCase):
+
+    def test_full_table(self):
+        s = setup_nft_table_script("blacklist", "v4", "v6")
+        self.assertIn("table inet blacklist {", s)
+        self.assertIn("set v4 {", s)
+        self.assertIn("type ipv4_addr", s)
+        self.assertIn("set v6 {", s)
+        self.assertIn("type ipv6_addr", s)
+        self.assertIn("ip saddr @v4 drop", s)
+        self.assertIn("ip6 saddr @v6 drop", s)
+
+    def test_ipv4_only(self):
+        s = setup_nft_table_script(ipv4_only=True)
+        self.assertIn("set v4 {", s)
+        self.assertNotIn("set v6 {", s)
+        self.assertIn("ip saddr @v4 drop", s)
+        self.assertNotIn("ip6 saddr", s)
+
+    def test_ipv6_only(self):
+        s = setup_nft_table_script(ipv6_only=True)
+        self.assertNotIn("set v4 {", s)
+        self.assertIn("set v6 {", s)
+        self.assertNotIn("ip saddr @v4", s)
+        self.assertIn("ip6 saddr @v6 drop", s)
+
+    def test_custom_names(self):
+        s = setup_nft_table_script("mytable", "myset4", "myset6")
+        self.assertIn("table inet mytable {", s)
+        self.assertIn("set myset4 {", s)
+        self.assertIn("set myset6 {", s)
+
+
+# ---------------------------------------------------------------------------
+# apply_nft_batch
+# ---------------------------------------------------------------------------
+class TestApplyNftBatch(unittest.TestCase):
+
+    def test_success(self):
+        cp = subprocess.CompletedProcess(args=[], returncode=0, stdout=b"", stderr=b"")
+        with mock.patch("update_blacklist.subprocess.run", return_value=cp) as m:
+            apply_nft_batch("flush set inet blacklist v4\n")
+            m.assert_called_once()
+            args = m.call_args
+            self.assertEqual(args[0][0], ["nft", "-f", "-"])
+
+    def test_failure_raises(self):
+        cp = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"Error: bad input")
+        with mock.patch("update_blacklist.subprocess.run", return_value=cp):
+            with self.assertRaises(RuntimeError) as ctx:
+                apply_nft_batch("bad script\n")
+            self.assertIn("bad input", str(ctx.exception))
+
+    def test_dry_run(self):
+        with mock.patch("update_blacklist.subprocess.run") as m:
+            apply_nft_batch("flush set inet blacklist v4\n", dry_run=True)
+            m.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

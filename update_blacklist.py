@@ -616,6 +616,50 @@ def write_nft_batch(path: str, table: str, set_v4: str, set_v6: str,
         logger.info("[DRY RUN] Would write nft batch: %s (v4=%d, v6=%d)", path, len(v4), len(v6))
     return text
 
+
+def setup_nft_table_script(table: str = DEFAULT_NFT_TABLE,
+                           set_v4: str = DEFAULT_NFT_SET_V4,
+                           set_v6: str = DEFAULT_NFT_SET_V6,
+                           ipv4_only: bool = False,
+                           ipv6_only: bool = False) -> str:
+    """Generate an nft -f script that creates the table, sets, and drop rules."""
+    lines = [
+        f"table inet {table} {{",
+    ]
+    if not ipv6_only:
+        lines.append(f"  set {set_v4} {{")
+        lines.append("    type ipv4_addr")
+        lines.append("    flags interval")
+        lines.append("  }")
+    if not ipv4_only:
+        lines.append(f"  set {set_v6} {{")
+        lines.append("    type ipv6_addr")
+        lines.append("    flags interval")
+        lines.append("  }")
+    lines.append("  chain input {")
+    lines.append("    type filter hook input priority filter; policy accept;")
+    if not ipv6_only:
+        lines.append(f"    ip saddr @{set_v4} drop")
+    if not ipv4_only:
+        lines.append(f"    ip6 saddr @{set_v6} drop")
+    lines.append("  }")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def apply_nft_batch(script: str, dry_run: bool = False) -> None:
+    """Run an nft batch script via nft -f stdin."""
+    if dry_run:
+        logger.info("[DRY RUN] Would apply nft batch (%d bytes)", len(script))
+        return
+    result = subprocess.run(["nft", "-f", "-"], input=script.encode("utf-8"),
+                            capture_output=True, timeout=30, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"nft -f failed (rc={result.returncode}): "
+                           f"{result.stderr.decode('utf-8', 'ignore').strip()}")
+    logger.info("Applied nft batch (%d bytes)", len(script))
+
+
 # ---------------- Rules ----------------
 def ensure_rule(cmd_check: List[str], cmd_insert: List[str], dry_run: bool = False) -> bool:
     """Idempotently ensure an iptables/ip6tables rule exists.
