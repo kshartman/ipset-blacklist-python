@@ -10,9 +10,7 @@ This is a complete rewrite in Python with no code from the original shell script
 - Fetches IP blocklists from URLs or local files
 - Normalizes to CIDRs (/32, /128 for hosts)
 - **Advanced deduplication**: Removes exact duplicates AND covered subnets (O(N·P) algorithm)
-- **Dual backend**: Native nftables support with auto-detection, plus legacy ipset+iptables
-- Generates `ipset restore` or `nft` batch files
-- Atomic apply with `--apply` flag (ipset swap or nft batch)
+- Generates `nft` batch files for atomic apply via `nft -f`
 - **Import/export** between ipset and nft formats
 
 ### Major Enhancements Over Original
@@ -26,7 +24,7 @@ This is a complete rewrite in Python with no code from the original shell script
 - **Progress indicators**: Won't flood SSH connections
 - **Configuration validation**: Warns about potential issues
 - **Security**: No shell injection vulnerabilities, fail-closed fetch, input validation
-- **nftables migration**: Three-phase migrate/rollback/finalize with dual-write coexistence
+- **nftables native**: Uses `nft` interval sets with auto-detection and atomic batch updates
 
 ## Drop-in Replacement
 
@@ -44,7 +42,7 @@ The Python script is designed as a **drop-in replacement** for the original shel
 ```
 
 - Reads the **same configuration file** format
-- Produces **compatible ipset restore files** (or nft batch files with `--backend nft`)
+- Produces **nft batch files** (or ipset restore with `--backend ipset`)
 - Supports all original config variables (BLACKLISTS, MAXELEM, HASHSIZE, etc.)
 - Adds `--force` flag equivalent to `FORCE=yes` in original
 - Includes `update-blacklist.sh` wrapper for cron jobs that call the original script name
@@ -52,7 +50,7 @@ The Python script is designed as a **drop-in replacement** for the original shel
 ## Requirements
 
 - Python 3.7+
-- `nftables` (recommended) **or** `ipset` (v6+ recommended) + `iptables`
+- `nftables`
 - **No Python packages required** - uses only standard library
 
 ## Development
@@ -139,7 +137,7 @@ sudo update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --no-f
 
 - `--version` - Show version number and exit
 - `--dry-run` - Simulate without making changes
-- `--force` - Create ipsets/rules if missing (like FORCE=yes)
+- `--force` - Create nft table/sets if missing
 - `--verbose` / `--quiet` - Control output verbosity
 - `--progress` - Show progress bars
 - `--collapse` - Additional CIDR aggregation
@@ -199,53 +197,6 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 This is a complete reimplementation in Python with no code from the original shell script.
 
-## nftables Migration
+## Migrating from ipset
 
-Migrate from ipset+iptables to nftables with zero downtime. Cron jobs keep running unchanged throughout.
-
-### Step 1: Migrate (both backends coexist)
-```bash
-sudo ./migrate-to-nftables.sh --conf /etc/ipset-blacklist/ipset-blacklist.conf
-```
-
-This creates an nft table alongside the existing ipset sets. `update_blacklist.py` auto-detects nft and dual-writes both backends on every cron run, keeping ipset fresh for rollback.
-
-### Step 2: Monitor
-```bash
-# Verify nft is being used
-sudo nft list table inet blacklist
-
-# Check cron logs
-grep update_blacklist /var/log/syslog
-```
-
-### Step 3: Finalize (or rollback)
-```bash
-# When confident:
-sudo ./migrate-to-nftables.sh --finalize
-
-# Or to revert:
-sudo ./migrate-to-nftables.sh --rollback
-```
-
-### Manual backend override
-```bash
-# Force nft in write-only mode
-sudo update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --backend nft
-
-# Convert existing ipset dump to nft
-sudo update_blacklist.py --import-ipset blacklist.dump --out blacklist.nft
-
-# Convert nft JSON to ipset restore
-sudo update_blacklist.py --export-ipset nft-dump.json --out blacklist.restore
-```
-
-## Migration from Shell Script
-
-1. **Test first**: Run with `--dry-run` to verify
-2. **Compare output**: Check restore file matches expected format
-3. **Update cron**: Change `update-blacklist.sh` to `update_blacklist.py`
-4. **Keep config**: Same config file works unchanged
-5. **Monitor initially**: Check logs after first few runs
-
-The Python version will produce slightly different (better) results due to covered subnet removal, but the format and structure remain fully compatible.
+See [MIGRATING.md](MIGRATING.md) for the full migration guide, import/export commands, and config keys.

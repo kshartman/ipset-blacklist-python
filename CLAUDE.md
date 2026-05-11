@@ -18,7 +18,7 @@ python3 -m unittest test_update_blacklist.TestOptimizeFast -v
 # Run a single test method
 python3 -m unittest test_update_blacklist.TestOptimizeFast.test_covered_subnet_removed -v
 
-# Test dry run (requires root + installed ipset/iptables)
+# Test dry run (requires root + nftables)
 sudo python3 update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --dry-run --verbose
 
 # Run specific feature without network access
@@ -41,7 +41,7 @@ Single-file Python script (`update_blacklist.py`) with no third-party dependenci
 
 Two operating modes:
 
-**Update mode** (default): Fetches IP blocklists → parses/normalizes → deduplicates → writes ipset restore file → optionally applies atomically via `ipset swap`.
+**Update mode** (default): Fetches IP blocklists → parses/normalizes → deduplicates → writes nft batch file → optionally applies atomically via `nft -f`.
 
 **Analyze mode** (`--analyze FILE`): Reads an existing `ipset save` dump, reports exact duplicates and covered subnets, optionally emits a clean CIDR list.
 
@@ -51,8 +51,8 @@ Two operating modes:
 2. **Fetch** (`fetch_source`) — HTTP/HTTPS with 3-attempt exponential backoff; local `file://` paths
 3. **Parse** (`parse_entry` / `parse_addr_token`) — handles raw IPs, CIDRs, `add <set> <addr>` lines; normalizes hosts to /32 or /128
 4. **Dedup** (`optimize_fast`) — O(N·P) algorithm: for each prefix length P (sorted shortest to longest), removes any network covered by a broader range already in the set; P ≤ 32 for v4, ≤ 128 for v6. Also filters private IPs via `is_private_ip`.
-5. **Write** (`write_restore`) — emits `ipset restore`-compatible format with `create` + `add` lines
-6. **Apply** (`--apply`) — uses a `-tmp` set name, `ipset restore`, `ipset swap`, then `ipset destroy` on the old set; ensures `iptables`/`ip6tables` `INPUT -m set --match-set` rules exist
+5. **Write** (`write_nft_batch` or `write_restore`) — emits nft batch (default) or ipset restore format
+6. **Apply** (`--apply`) — nft: `flush set` + chunked `add element` via `nft -f`; ipset (legacy): `-tmp` set, `ipset restore`, `ipset swap`
 
 ### Public API (imported by tests)
 
@@ -93,20 +93,8 @@ Config lives at `/etc/ipset-blacklist/ipset-blacklist.conf` on each host. Change
 
 ### nftables backend
 
-Auto-detection prefers nft over ipset during coexistence (after migrate, before finalize). Detection validates table structure via `nft -j` JSON, not just existence. Write-only mode always emits ipset format unless `--backend nft` explicit.
-
-New CLI args: `--backend {ipset,nft,auto}`, `--nft-table`, `--nft-set-v4`, `--nft-set-v6`, `--import-ipset`, `--export-ipset`, `--analyze-format {ipset,nft,auto}`.
-
-New config keys: `BACKEND`, `NFT_TABLE`, `NFT_SET_V4`, `NFT_SET_V6`.
-
-Key functions: `detect_backend`, `check_nft_table_valid`, `write_nft_batch`, `setup_nft_table_script`, `apply_nft_batch`, `parse_nft_dump`, `detect_dump_format`, `format_net_str`.
-
-During coexistence (`migrate-to-nftables.sh` state=migrated), cron dual-writes both nft AND ipset so rollback always has fresh data.
+All hosts run nftables. Auto-detection validates table structure via `nft -j` JSON. Legacy ipset codepath remains but is unused. See [MIGRATING.md](MIGRATING.md) for ipset-to-nft migration guide.
 
 ### Config dataclass
 
-`Config` dataclass (15 fields) replaces the old `Dict[str, Any]`. Immutable after construction — `load_conf()` parses the file, `_resolve_config()` merges CLI overrides via `dataclasses.replace()`. All public functions accept `Config` instead of positional args.
-
-### Migration script
-
-`migrate-to-nftables.sh` — standalone bash, three modes: migrate (default), `--rollback`, `--finalize`. State tracked in `/var/lib/ipset-blacklist/migration-state`. Reads set names from `ipset-blacklist.conf` via `--conf`.
+`Config` dataclass (15 fields). Immutable after construction — `load_conf()` parses the file, `_resolve_config()` merges CLI overrides via `dataclasses.replace()`.
