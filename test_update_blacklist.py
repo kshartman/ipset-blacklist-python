@@ -22,6 +22,8 @@ from update_blacklist import (
     check_nft_table_valid,
     detect_backend,
     detect_dump_format,
+    ensure_rule,
+    fetch_source,
     format_net_str,
     is_local_path,
     is_private_ip,
@@ -938,6 +940,157 @@ class TestImportExport(unittest.TestCase):
                 if n:
                     found.append(str(n))
         self.assertEqual(sorted(found), orig_strs)
+
+
+# ---------------------------------------------------------------------------
+# fetch_source
+# ---------------------------------------------------------------------------
+class TestFetchSource(unittest.TestCase):
+
+    def test_local_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("1.2.3.4\n5.6.7.8\n")
+            f.flush()
+            result = fetch_source(f.name, timeout=5)
+        self.assertIn("1.2.3.4", result)
+        self.assertIn("5.6.7.8", result)
+
+    def test_local_file_url(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("10.0.0.1\n")
+            f.flush()
+            result = fetch_source(f"file://{f.name}", timeout=5)
+        self.assertIn("10.0.0.1", result)
+
+    def test_local_file_missing(self):
+        result = fetch_source("/nonexistent/path/file.txt", timeout=5)
+        self.assertEqual(result, "")
+
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_http_success(self, mock_urlopen):
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = b"1.1.1.1\n2.2.2.2\n"
+        mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = mock.MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+        result = fetch_source("https://example.com/list.txt", timeout=10)
+        self.assertIn("1.1.1.1", result)
+        mock_urlopen.assert_called_once()
+
+    @mock.patch("update_blacklist.time.sleep")
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_http_4xx_no_retry(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://example.com/list.txt", 404, "Not Found", {}, None)
+        result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertEqual(result, "")
+        mock_urlopen.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @mock.patch("update_blacklist.time.sleep")
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_http_5xx_retries(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.HTTPError(
+            "https://example.com/list.txt", 503, "Service Unavailable", {}, None)
+        result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertEqual(result, "")
+        self.assertEqual(mock_urlopen.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    @mock.patch("update_blacklist.time.sleep")
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_http_5xx_then_success(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = b"9.9.9.9\n"
+        mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = mock.MagicMock(return_value=False)
+        mock_urlopen.side_effect = [
+            urllib.error.HTTPError("u", 500, "ISE", {}, None),
+            mock_resp,
+        ]
+        result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertIn("9.9.9.9", result)
+        self.assertEqual(mock_urlopen.call_count, 2)
+
+    @mock.patch("update_blacklist.time.sleep")
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_cert_error_no_retry(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError(
+            "SSL: certificate verify failed")
+        result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertEqual(result, "")
+        mock_urlopen.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @mock.patch("update_blacklist.time.sleep")
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_network_error_retries(self, mock_urlopen, mock_sleep):
+        import urllib.error
+        mock_urlopen.side_effect = urllib.error.URLError("Connection refused")
+        result = fetch_source("https://example.com/list.txt", timeout=10, max_retries=2)
+        self.assertEqual(result, "")
+        self.assertEqual(mock_urlopen.call_count, 3)
+
+    @mock.patch("update_blacklist.urllib.request.urlopen")
+    def test_user_agent_header(self, mock_urlopen):
+        mock_resp = mock.MagicMock()
+        mock_resp.read.return_value = b""
+        mock_resp.__enter__ = mock.MagicMock(return_value=mock_resp)
+        mock_resp.__exit__ = mock.MagicMock(return_value=False)
+        mock_urlopen.return_value = mock_resp
+        fetch_source("https://example.com/list.txt", timeout=10)
+        req = mock_urlopen.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"), "ipset-blacklist-py")
+
+
+# ---------------------------------------------------------------------------
+# ensure_rule
+# ---------------------------------------------------------------------------
+class TestEnsureRule(unittest.TestCase):
+
+    def test_dry_run_returns_true(self):
+        result = ensure_rule(
+            ["iptables", "-C", "INPUT", "-j", "DROP"],
+            ["iptables", "-I", "INPUT", "-j", "DROP"],
+            dry_run=True)
+        self.assertTrue(result)
+
+    @mock.patch("update_blacklist.subprocess.run")
+    def test_rule_already_exists(self, mock_run):
+        mock_run.return_value = mock.MagicMock(returncode=0)
+        result = ensure_rule(
+            ["iptables", "-C", "INPUT", "-j", "DROP"],
+            ["iptables", "-I", "INPUT", "-j", "DROP"])
+        self.assertTrue(result)
+        mock_run.assert_called_once()
+
+    @mock.patch("update_blacklist.subprocess.run")
+    def test_rule_inserted(self, mock_run):
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "iptables"),
+            mock.MagicMock(returncode=0),
+        ]
+        result = ensure_rule(
+            ["iptables", "-C", "INPUT", "-j", "DROP"],
+            ["iptables", "-I", "INPUT", "-j", "DROP"])
+        self.assertFalse(result)
+        self.assertEqual(mock_run.call_count, 2)
+
+    @mock.patch("update_blacklist.subprocess.run")
+    def test_insert_failure_raises(self, mock_run):
+        mock_run.side_effect = [
+            subprocess.CalledProcessError(1, "iptables -C"),
+            subprocess.CalledProcessError(1, "iptables -I"),
+        ]
+        with self.assertRaises(RuntimeError) as ctx:
+            ensure_rule(
+                ["iptables", "-C", "INPUT", "-j", "DROP"],
+                ["iptables", "-I", "INPUT", "-j", "DROP"])
+        self.assertIn("Failed to insert rule", str(ctx.exception))
 
 
 # ---------------------------------------------------------------------------
