@@ -53,24 +53,28 @@ IPSET_V6_COUNT=${IPSET_V6_COUNT:-0}
 EOF
 }
 
+_conf_val() {
+    sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\([^#]*\).*/\1/p" "$CONF_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
 load_conf() {
-    [ ! -f "$CONF_FILE" ] && return
+    if [ ! -f "$CONF_FILE" ]; then return; fi
     local val
-    val=$(grep -E '^\s*IPSET_BLACKLIST_NAME\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
+    val=$(_conf_val IPSET_BLACKLIST_NAME)
     if [ -n "$val" ]; then
         IPSET_V4="$val"
         IPSET_V6="${val}6"
     fi
-    val=$(grep -E '^\s*SET_NAME4\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
-    [ -n "$val" ] && IPSET_V4="$val"
-    val=$(grep -E '^\s*SET_NAME6\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
-    [ -n "$val" ] && IPSET_V6="$val"
-    val=$(grep -E '^\s*NFT_TABLE\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
-    [ -n "$val" ] && NFT_TABLE="$val"
-    val=$(grep -E '^\s*NFT_SET_V4\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
-    [ -n "$val" ] && NFT_SET_V4="$val"
-    val=$(grep -E '^\s*NFT_SET_V6\s*=' "$CONF_FILE" 2>/dev/null | sed 's/.*=\s*//' | tr -d '[:space:]')
-    [ -n "$val" ] && NFT_SET_V6="$val"
+    val=$(_conf_val SET_NAME4)
+    if [ -n "$val" ]; then IPSET_V4="$val"; fi
+    val=$(_conf_val SET_NAME6)
+    if [ -n "$val" ]; then IPSET_V6="$val"; fi
+    val=$(_conf_val NFT_TABLE)
+    if [ -n "$val" ]; then NFT_TABLE="$val"; fi
+    val=$(_conf_val NFT_SET_V4)
+    if [ -n "$val" ]; then NFT_SET_V4="$val"; fi
+    val=$(_conf_val NFT_SET_V6)
+    if [ -n "$val" ]; then NFT_SET_V6="$val"; fi
 }
 
 cleanup_on_error() {
@@ -84,7 +88,7 @@ ipset_set_exists() {
 }
 
 count_ipset_entries() {
-    ipset list "$1" 2>/dev/null | grep -cE '^\d' || echo 0
+    ipset list "$1" 2>/dev/null | grep -cE '^[0-9]' || true
 }
 
 count_nft_elements() {
@@ -145,7 +149,7 @@ while [ $# -gt 0 ]; do
 done
 
 # ---------------- Pre-flight ----------------
-[ "$EUID" -ne 0 ] && die "Must run as root"
+if [ "$EUID" -ne 0 ]; then die "Must run as root"; fi
 load_conf
 
 # ================================================================
@@ -158,8 +162,8 @@ do_migrate() {
 
     local state
     state=$(read_state)
-    [ "$state" = "migrated" ] && die "Already migrated. Run --finalize or --rollback."
-    [ "$state" = "finalized" ] && die "Already finalized. nft is the active backend."
+    if [ "$state" = "migrated" ]; then die "Already migrated. Run --finalize or --rollback."; fi
+    if [ "$state" = "finalized" ]; then die "Already finalized. nft is the active backend."; fi
 
     if nft list table inet "$NFT_TABLE" >/dev/null 2>&1; then
         die "nft table 'inet $NFT_TABLE' already exists. Remove it first or run --rollback."
@@ -259,10 +263,10 @@ ${v6_script}"
 do_rollback() {
     local state
     state=$(read_state)
-    [ -z "$state" ] && die "No migration in progress. Nothing to rollback."
-    [ "$state" = "finalized" ] && die "Cannot rollback after finalize. Restore from backup manually."
-    [ "$state" = "rolled-back" ] && die "Already rolled back."
-    [ "$state" != "migrated" ] && die "Unexpected state: $state"
+    if [ -z "$state" ]; then die "No migration in progress. Nothing to rollback."; fi
+    if [ "$state" = "finalized" ]; then die "Cannot rollback after finalize. Restore from backup manually."; fi
+    if [ "$state" = "rolled-back" ]; then die "Already rolled back."; fi
+    if [ "$state" != "migrated" ]; then die "Unexpected state: $state"; fi
 
     info "Rolling back: removing nft table inet $NFT_TABLE..."
     nft delete table inet "$NFT_TABLE" 2>/dev/null || warn "nft table already gone"
@@ -282,16 +286,16 @@ do_rollback() {
 do_finalize() {
     local state
     state=$(read_state)
-    [ -z "$state" ] && die "No migration in progress. Run migrate first."
-    [ "$state" = "finalized" ] && die "Already finalized."
-    [ "$state" = "rolled-back" ] && die "Migration was rolled back. Run migrate again first."
-    [ "$state" != "migrated" ] && die "Unexpected state: $state"
+    if [ -z "$state" ]; then die "No migration in progress. Run migrate first."; fi
+    if [ "$state" = "finalized" ]; then die "Already finalized."; fi
+    if [ "$state" = "rolled-back" ]; then die "Migration was rolled back. Run migrate again first."; fi
+    if [ "$state" != "migrated" ]; then die "Unexpected state: $state"; fi
 
     # Verify nft is active and populated
     nft list table inet "$NFT_TABLE" >/dev/null 2>&1 || die "nft table 'inet $NFT_TABLE' not found"
     local nft_v4_count
     nft_v4_count=$(count_nft_elements "$NFT_SET_V4")
-    [ "$nft_v4_count" -eq 0 ] && die "nft set $NFT_SET_V4 is empty. Populate it before finalizing."
+    if [ "$nft_v4_count" -eq 0 ]; then die "nft set $NFT_SET_V4 is empty. Populate it before finalizing."; fi
 
     info "Finalizing: removing ipset+iptables..."
 
