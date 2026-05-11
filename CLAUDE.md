@@ -58,7 +58,7 @@ Two operating modes:
 
 ### Public API (imported by tests)
 
-`analyze_dumpfile`, `is_private_ip`, `load_conf`, `optimize_fast`, `parse_addr_token`, `parse_entry`, `write_restore`, `tuple_to_net`
+`Config`, `analyze_dumpfile`, `apply_nft_batch`, `check_nft_table_valid`, `detect_backend`, `detect_dump_format`, `format_net_str`, `is_private_ip`, `load_conf`, `optimize_fast`, `parse_addr_token`, `parse_entry`, `parse_nft_dump`, `setup_nft_table_script`, `tuple_to_net`, `write_nft_batch`, `write_restore`
 
 ### IPv4/IPv6 split
 
@@ -66,7 +66,7 @@ The script maintains separate v4 and v6 network lists throughout. Sets are named
 
 ### Configuration format
 
-`ipset-blacklist.conf` uses bash variable syntax. The parser extracts values with regex; it does **not** source the file. Supported keys: `IPSET_BLACKLIST_NAME`, `IP_BLACKLIST_RESTORE`, `IP_BLACKLIST`, `BLACKLISTS`, `MAXELEM`, `HASHSIZE`, `VERBOSE`, `FORCE`, `IPTABLES_IPSET_RULE_NUMBER`.
+`ipset-blacklist.conf` uses bash variable syntax. The parser extracts values with regex; it does **not** source the file. Supported keys: `IPSET_BLACKLIST_NAME`, `IP_BLACKLIST_RESTORE`, `IP_BLACKLIST`, `BLACKLISTS`, `MAXELEM`, `HASHSIZE`, `VERBOSE`, `FORCE`, `IPTABLES_IPSET_RULE_NUMBER`, `BACKEND`, `NFT_TABLE`, `NFT_SET_V4`, `NFT_SET_V6`.
 
 ### Deployment hosts
 
@@ -93,6 +93,22 @@ Config lives at `/etc/ipset-blacklist/ipset-blacklist.conf` on each host. Change
 
 `PRIVATE_NETWORKS` constant lists RFC1918, loopback, link-local, multicast, and IPv6 equivalents. Applied after parsing, before dedup. Disable with `--no-filter-private`.
 
-### Planned: nftables migration
+### nftables backend
 
-See `NFTABLES_MIGRATION.md`. Auto-detect backend (`--backend {ipset,nft,auto}`), prefer continuity over novelty (keep ipset if existing set found). New functions: `detect_backend`, `write_nft_batch`, `apply_nft_batch`, etc.
+Auto-detection prefers nft over ipset during coexistence (after migrate, before finalize). Detection validates table structure via `nft -j` JSON, not just existence. Write-only mode always emits ipset format unless `--backend nft` explicit.
+
+New CLI args: `--backend {ipset,nft,auto}`, `--nft-table`, `--nft-set-v4`, `--nft-set-v6`, `--import-ipset`, `--export-ipset`, `--analyze-format {ipset,nft,auto}`.
+
+New config keys: `BACKEND`, `NFT_TABLE`, `NFT_SET_V4`, `NFT_SET_V6`.
+
+Key functions: `detect_backend`, `check_nft_table_valid`, `write_nft_batch`, `setup_nft_table_script`, `apply_nft_batch`, `parse_nft_dump`, `detect_dump_format`, `format_net_str`.
+
+During coexistence (`migrate-to-nftables.sh` state=migrated), cron dual-writes both nft AND ipset so rollback always has fresh data.
+
+### Config dataclass
+
+`Config` dataclass (15 fields) replaces the old `Dict[str, Any]`. Immutable after construction — `load_conf()` parses the file, `_resolve_config()` merges CLI overrides via `dataclasses.replace()`. All public functions accept `Config` instead of positional args.
+
+### Migration script
+
+`migrate-to-nftables.sh` — standalone bash, three modes: migrate (default), `--rollback`, `--finalize`. State tracked in `/var/lib/ipset-blacklist/migration-state`. Reads set names from `ipset-blacklist.conf` via `--conf`.
