@@ -52,31 +52,35 @@ if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$PYTHON_VERSION" | sort -V | head -n1
     exit 1
 fi
 
-# Check for ipset
-if ! command -v ipset &> /dev/null; then
-    echo -e "${RED}Error: ipset is not installed${NC}"
-    echo "Install with: apt-get install ipset"
-    exit 1
-else
-    # Verify ipset actually works
-    if ! ipset list -n &> /dev/null; then
-        echo -e "${RED}Error: ipset command found but not working${NC}"
-        echo "Check that ipset kernel modules are loaded"
-        exit 1
+# Check for firewall backend (ipset+iptables or nft)
+HAS_IPSET=false
+HAS_NFT=false
+
+if command -v nft &> /dev/null; then
+    HAS_NFT=true
+    echo -e "${GREEN}✓ nft found${NC}"
+fi
+
+if command -v ipset &> /dev/null; then
+    if ipset list -n &> /dev/null; then
+        HAS_IPSET=true
+        echo -e "${GREEN}✓ ipset found and working${NC}"
+    else
+        echo -e "${YELLOW}Warning: ipset command found but not working${NC}"
     fi
 fi
 
-# Check for iptables
-if ! command -v iptables &> /dev/null; then
-    echo -e "${RED}Error: iptables is not installed${NC}"
-    echo "Install with: apt-get install iptables"
+if ! $HAS_IPSET && ! $HAS_NFT; then
+    echo -e "${RED}Error: Neither nft nor ipset is available${NC}"
+    echo "Install nftables (recommended) or ipset"
     exit 1
-else
-    # Verify iptables actually works
-    if ! iptables -L -n &> /dev/null; then
-        echo -e "${RED}Error: iptables command found but not working${NC}"
-        echo "Check that iptables kernel modules are loaded"
-        exit 1
+fi
+
+if $HAS_IPSET && command -v iptables &> /dev/null; then
+    if iptables -L -n &> /dev/null; then
+        echo -e "${GREEN}✓ iptables found and working${NC}"
+    else
+        echo -e "${YELLOW}Warning: iptables command found but not working${NC}"
     fi
 fi
 
@@ -97,6 +101,13 @@ echo "Installing executable..."
 install -m 0755 "$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
 sed -i "s/^__version__ = \"dev\"/__version__ = \"$VERSION\"/" "$INSTALL_DIR/$SCRIPT_NAME"
 echo -e "${GREEN}✓ Installed: $INSTALL_DIR/$SCRIPT_NAME${NC}"
+
+# Install drop-in wrapper (compatible with original update-blacklist.sh calling convention)
+WRAPPER_NAME="update-blacklist.sh"
+if [ -f "$WRAPPER_NAME" ]; then
+    install -m 0755 "$WRAPPER_NAME" "$INSTALL_DIR/$WRAPPER_NAME"
+    echo -e "${GREEN}✓ Installed: $INSTALL_DIR/$WRAPPER_NAME (drop-in wrapper)${NC}"
+fi
 
 # Install man page if it exists
 if [ -f "$MAN_PAGE" ]; then
@@ -185,4 +196,19 @@ echo "Analyze existing ipset:"
 echo "  ipset save blacklist > blacklist.dump"
 echo "  $INSTALL_DIR/$SCRIPT_NAME --analyze blacklist.dump --set blacklist --show-removed"
 echo
+
+if $HAS_NFT; then
+    echo "==========================================="
+    echo "NFTABLES MIGRATION"
+    echo "==========================================="
+    echo
+    echo "To migrate from ipset+iptables to nftables:"
+    echo "  sudo ./migrate-to-nftables.sh --conf $CONFIG_DIR/$CONFIG_FILE"
+    echo
+    echo "Both backends coexist until you finalize. Cron jobs keep running unchanged."
+    echo "Rollback:  sudo ./migrate-to-nftables.sh --rollback"
+    echo "Finalize:  sudo ./migrate-to-nftables.sh --finalize"
+    echo
+fi
+
 echo -e "${GREEN}Deployment complete!${NC}"

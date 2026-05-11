@@ -45,8 +45,7 @@ The Python script is designed as a **drop-in replacement** for the original shel
 ## Requirements
 
 - Python 3.7+
-- `ipset` (v6+ recommended)
-- `iptables` (and `ip6tables` if using IPv6)
+- `nftables` (recommended) **or** `ipset` (v6+ recommended) + `iptables`
 - **No Python packages required** - uses only standard library
 
 ## Development
@@ -182,6 +181,47 @@ Suitable for any system with 1GB+ RAM.
 MIT License - See [LICENSE](LICENSE) file for details.
 
 This is a complete reimplementation in Python with no code from the original shell script.
+
+## nftables Migration
+
+Migrate from ipset+iptables to nftables with zero downtime. Cron jobs keep running unchanged throughout.
+
+### Step 1: Migrate (both backends coexist)
+```bash
+sudo ./migrate-to-nftables.sh --conf /etc/ipset-blacklist/ipset-blacklist.conf
+```
+
+This creates an nft table alongside the existing ipset sets. `update_blacklist.py` auto-detects nft and dual-writes both backends on every cron run, keeping ipset fresh for rollback.
+
+### Step 2: Monitor
+```bash
+# Verify nft is being used
+sudo nft list table inet blacklist
+
+# Check cron logs
+grep update_blacklist /var/log/syslog
+```
+
+### Step 3: Finalize (or rollback)
+```bash
+# When confident:
+sudo ./migrate-to-nftables.sh --finalize
+
+# Or to revert:
+sudo ./migrate-to-nftables.sh --rollback
+```
+
+### Manual backend override
+```bash
+# Force nft in write-only mode
+sudo update_blacklist.py --conf /etc/ipset-blacklist/ipset-blacklist.conf --backend nft
+
+# Convert existing ipset dump to nft
+sudo update_blacklist.py --import-ipset blacklist.dump --out blacklist.nft
+
+# Convert nft JSON to ipset restore
+sudo update_blacklist.py --export-ipset nft-dump.json --out blacklist.restore
+```
 
 ## Migration from Shell Script
 
