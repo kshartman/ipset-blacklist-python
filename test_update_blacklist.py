@@ -851,6 +851,84 @@ class TestMainNftIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# import / export
+# ---------------------------------------------------------------------------
+class TestImportExport(unittest.TestCase):
+
+    def test_import_ipset_to_nft(self):
+        """--import-ipset converts ipset dump to nft batch."""
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".dump", delete=False)
+        src.write("add blacklist 1.2.3.4\nadd blacklist 10.0.0.0/8\n")
+        src.close()
+        out = tempfile.NamedTemporaryFile(suffix=".nft", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--import-ipset", src.name,
+                                              "--out", out.name, "--quiet"]):
+            from update_blacklist import main
+            main()
+        with open(out.name, "r") as f:
+            content = f.read()
+        self.assertIn("flush set inet blacklist v4", content)
+        self.assertIn("1.2.3.4", content)
+        self.assertIn("10.0.0.0/8", content)
+
+    def test_export_nft_to_ipset(self):
+        """--export-ipset converts nft JSON to ipset restore."""
+        data = {"nftables": [
+            {"set": {"name": "v4", "elem": ["1.2.3.4", "5.6.7.8"]}}
+        ]}
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        src.write(json.dumps(data))
+        src.close()
+        out = tempfile.NamedTemporaryFile(suffix=".restore", delete=False)
+        out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--export-ipset", src.name,
+                                              "--out", out.name, "--quiet"]):
+            from update_blacklist import main
+            main()
+        with open(out.name, "r") as f:
+            content = f.read()
+        self.assertIn("create blacklist", content)
+        self.assertIn("add blacklist 1.2.3.4", content)
+        self.assertIn("add blacklist 5.6.7.8", content)
+
+    def test_roundtrip(self):
+        """ipset → nft → ipset roundtrip preserves entries."""
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".dump", delete=False)
+        src.write("add blacklist 1.2.3.4\nadd blacklist 10.0.0.0/8\n")
+        src.close()
+
+        from update_blacklist import analyze_dumpfile, parse_nft_dump
+        nets_orig, _ = analyze_dumpfile(src.name)
+        orig_strs = sorted(str(n) for n in nets_orig)
+
+        nft_out = tempfile.NamedTemporaryFile(suffix=".nft", delete=False)
+        nft_out.close()
+        import sys
+        with mock.patch.object(sys, "argv", ["prog", "--import-ipset", src.name,
+                                              "--out", nft_out.name, "--quiet"]):
+            from update_blacklist import main
+            main()
+
+        # parse_nft_dump needs JSON, but write_nft_batch writes nft batch text.
+        # Roundtrip verifies the entries survive the conversion by re-parsing the batch.
+        with open(nft_out.name, "r") as f:
+            batch = f.read()
+        # Extract IPs from "add element inet blacklist v4 { ... }" lines
+        import re
+        found = []
+        for m in re.finditer(r'add element inet \S+ \S+ \{ (.+?) \}', batch):
+            for tok in m.group(1).split(", "):
+                from update_blacklist import parse_addr_token
+                n = parse_addr_token(tok.strip())
+                if n:
+                    found.append(str(n))
+        self.assertEqual(sorted(found), orig_strs)
+
+
+# ---------------------------------------------------------------------------
 # Version
 # ---------------------------------------------------------------------------
 class TestVersion(unittest.TestCase):

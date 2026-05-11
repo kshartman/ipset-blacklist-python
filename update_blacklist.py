@@ -786,6 +786,9 @@ def main():
     ap.add_argument("--nft-table", default=None, help="nft table name (default: config or 'blacklist').")
     ap.add_argument("--nft-set-v4", default=None, help="nft v4 set name (default: config or 'v4').")
     ap.add_argument("--nft-set-v6", default=None, help="nft v6 set name (default: config or 'v6').")
+    # Conversion commands
+    ap.add_argument("--import-ipset", metavar="FILE", help="Convert ipset dump to nft batch format (write to --out).")
+    ap.add_argument("--export-ipset", metavar="FILE", help="Convert nft JSON dump to ipset restore format (write to --out).")
     args = ap.parse_args()
 
     # Configure logging based on verbosity
@@ -801,6 +804,30 @@ def main():
         logger.info("[DRY RUN MODE] No changes will be made to the system")
         if not args.apply:
             args.no_write = True
+
+    # IMPORT: ipset dump → nft batch
+    if args.import_ipset:
+        nets, totals = analyze_dumpfile(args.import_ipset)
+        v4 = [format_net_str(n) for n in nets if n.version == 4]
+        v6 = [format_net_str(n) for n in nets if n.version == 6]
+        nft_table = args.nft_table or DEFAULT_NFT_TABLE
+        nft_sv4 = args.nft_set_v4 or DEFAULT_NFT_SET_V4
+        nft_sv6 = args.nft_set_v6 or DEFAULT_NFT_SET_V6
+        out = args.out or "/dev/stdout"
+        text = write_nft_batch(out, nft_table, nft_sv4, nft_sv6, v4, v6)
+        logger.info("Converted %d entries (v4=%d, v6=%d)", totals["adds_total"], len(v4), len(v6))
+        return
+
+    # EXPORT: nft JSON dump → ipset restore
+    if args.export_ipset:
+        nets, totals = parse_nft_dump(args.export_ipset)
+        v4 = [format_net_str(n) for n in nets if n.version == 4]
+        v6 = [format_net_str(n) for n in nets if n.version == 6]
+        out = args.out or "/dev/stdout"
+        text = write_restore(out, DEFAULT_SET_V4, DEFAULT_SET_V6,
+                             DEFAULT_HASHSIZE, DEFAULT_MAXELEM, v4, v6)
+        logger.info("Exported %d entries (v4=%d, v6=%d)", totals["adds_total"], len(v4), len(v6))
+        return
 
     # ANALYZE MODE
     if args.analyze:
