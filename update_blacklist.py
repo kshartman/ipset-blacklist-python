@@ -11,10 +11,8 @@ Python ipset-blacklist with fast final-list optimization + --apply + --analyze.
 - With --apply: atomically swaps tmp sets into place and ensures iptables/ip6tables rules exist
 - With --analyze FILE: analyze an ipset save/restore file for exact dupes & covered subnets; optionally emit clean CIDR list
 - IPv4-only environments are handled gracefully: v6 blocks/rules are omitted when there are no v6 entries (or use --ipv4-only)
-
-TODO: Migrate to nftables backend with auto-detection (see NFTABLES_MIGRATION.md).
-      Use nft if present and no existing ipset blacklist, otherwise fall back to ipset+iptables.
-      Add --backend {ipset,nft,auto}, --export-ipset, --import-ipset flags.
+- Supports nftables backend with auto-detection (nft preferred over ipset during coexistence)
+- Import/export between ipset and nft formats via --import-ipset / --export-ipset
 """
 
 import argparse
@@ -1111,7 +1109,7 @@ def _force_create_ipsets(cfg: Config,
             logger.info("Creating ipset %s (--force mode)", setname)
             subprocess.run(["ipset", "create", setname, hash_type,
                            "family", family, "hashsize", str(cfg.hashsize),
-                           "maxelem", str(cfg.maxelem)], check=False)
+                           "maxelem", str(cfg.maxelem)], check=False, timeout=10)
 
 
 def _ensure_iptables_rules(args: argparse.Namespace, cfg: Config,
