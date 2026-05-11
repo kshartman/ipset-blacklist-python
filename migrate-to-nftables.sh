@@ -3,9 +3,10 @@
 # migrate-to-nftables.sh — three-phase migration from ipset+iptables to nftables
 #
 # Usage:
-#   sudo ./migrate-to-nftables.sh [--conf PATH]            # migrate (create nft alongside ipset)
-#   sudo ./migrate-to-nftables.sh --rollback [--conf PATH]  # remove nft, revert to ipset
-#   sudo ./migrate-to-nftables.sh --finalize [--conf PATH]  # remove ipset+iptables, nft only
+#   sudo ./migrate-to-nftables.sh [--conf PATH]                          # migrate
+#   sudo ./migrate-to-nftables.sh --rollback [--conf PATH]               # rollback
+#   sudo ./migrate-to-nftables.sh --finalize --enable-service [--conf P] # finalize
+#   sudo ./migrate-to-nftables.sh --finalize --dry-run [--conf PATH]     # preview
 #
 # State is tracked in /var/lib/ipset-blacklist/migration-state.
 # Backups are written to /var/backups/ipset-blacklist-*.
@@ -17,12 +18,19 @@ STATE_DIR="/var/lib/ipset-blacklist"
 STATE_FILE="$STATE_DIR/migration-state"
 BACKUP_DIR="/var/backups"
 CONF_FILE="/etc/ipset-blacklist/ipset-blacklist.conf"
+DRY_RUN=false
+ENABLE_SERVICE=false
 
 NFT_TABLE="blacklist"
 NFT_SET_V4="v4"
 NFT_SET_V6="v6"
 IPSET_V4="blacklist"
 IPSET_V6="blacklist6"
+
+NFT_DROP_DIR="/etc/nftables.d"
+NFT_DROP_FILE="$NFT_DROP_DIR/blacklist.nft"
+SYSTEMD_UNIT="nft-blacklist.service"
+SYSTEMD_UNIT_FILE="/etc/systemd/system/$SYSTEMD_UNIT"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -37,6 +45,16 @@ warn() { echo -e "${YELLOW}$1${NC}"; }
 read_state() {
     if [ -f "$STATE_FILE" ]; then
         grep "^STATE=" "$STATE_FILE" 2>/dev/null | cut -d= -f2
+    fi
+}
+
+check_script_nft_capable() {
+    local script="/usr/local/sbin/update_blacklist.py"
+    if [ ! -f "$script" ]; then
+        die "update_blacklist.py not found at $script. Deploy it first."
+    fi
+    if ! grep -q 'detect_backend' "$script"; then
+        die "Deployed $script lacks nft support (detect_backend not found).\nDeploy the nft-capable version before migrating."
     fi
 }
 
@@ -132,16 +150,23 @@ for i in range(0, len(entries), CHUNK):
 MODE="migrate"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --rollback) MODE="rollback"; shift ;;
-        --finalize) MODE="finalize"; shift ;;
-        --conf)     CONF_FILE="$2"; shift 2 ;;
+        --rollback)       MODE="rollback"; shift ;;
+        --finalize)       MODE="finalize"; shift ;;
+        --dry-run)        DRY_RUN=true; shift ;;
+        --enable-service) ENABLE_SERVICE=true; shift ;;
+        --conf)           CONF_FILE="$2"; shift 2 ;;
         -h|--help)
-            echo "Usage: $0 [--rollback|--finalize] [--conf PATH]"
+            echo "Usage: $0 [--rollback|--finalize] [--dry-run] [--enable-service] [--conf PATH]"
             echo ""
             echo "Modes:"
-            echo "  (default)   Create nft table alongside ipset (coexistence)"
-            echo "  --rollback  Remove nft table, revert to ipset only"
-            echo "  --finalize  Remove ipset+iptables, keep nft only"
+            echo "  (default)        Create nft table alongside ipset (coexistence)"
+            echo "  --rollback       Remove nft table, revert to ipset only"
+            echo "  --finalize       Remove ipset+iptables, keep nft only"
+            echo ""
+            echo "Options:"
+            echo "  --dry-run        Show what finalize would do without making changes"
+            echo "  --enable-service Install and enable nft-blacklist.service (required for finalize)"
+            echo "  --conf PATH      Path to ipset-blacklist.conf"
             exit 0
             ;;
         *) die "Unknown option: $1" ;;
@@ -158,6 +183,7 @@ load_conf
 do_migrate() {
     command -v nft  >/dev/null 2>&1 || die "nft binary not found. Install nftables first."
     command -v ipset >/dev/null 2>&1 || die "ipset binary not found."
+    check_script_nft_capable
     ipset_set_exists "$IPSET_V4" || die "ipset set '$IPSET_V4' not found. Nothing to migrate."
 
     local state
@@ -249,11 +275,14 @@ ${v6_script}"
     info "=== Migration complete ==="
     info "  ipset+iptables left in place (rollback available)"
     info "  nft table 'inet $NFT_TABLE' created with $nft_v4_count v4 + $nft_v6_count v6 entries"
+
     echo ""
     info "Next steps:"
     info "  - Next cron run of update_blacklist.py will auto-detect nft and dual-write both backends"
     info "  - Monitor for a few runs, then finalize:"
-    info "    sudo $0 --finalize"
+    info "    sudo $0 --finalize --enable-service"
+    info "  - Preview finalize without making changes:"
+    info "    sudo $0 --finalize --dry-run"
     info "  - To undo: sudo $0 --rollback"
 }
 
@@ -291,11 +320,46 @@ do_finalize() {
     if [ "$state" = "rolled-back" ]; then die "Migration was rolled back. Run migrate again first."; fi
     if [ "$state" != "migrated" ]; then die "Unexpected state: $state"; fi
 
+    check_script_nft_capable
+
     # Verify nft is active and populated
     nft list table inet "$NFT_TABLE" >/dev/null 2>&1 || die "nft table 'inet $NFT_TABLE' not found"
     local nft_v4_count
     nft_v4_count=$(count_nft_elements "$NFT_SET_V4")
     if [ "$nft_v4_count" -eq 0 ]; then die "nft set $NFT_SET_V4 is empty. Populate it before finalizing."; fi
+
+    # --dry-run or missing --enable-service: show what would happen and exit
+    if $DRY_RUN || ! $ENABLE_SERVICE; then
+        if $DRY_RUN; then
+            info "=== Dry run: finalize would perform these actions ==="
+        else
+            warn "=== --enable-service required to finalize ==="
+            warn "Finalize would perform these actions:"
+        fi
+        echo ""
+        local step=1
+        info "  $step. Remove iptables DROP rules for $IPSET_V4 / $IPSET_V6"; step=$((step + 1))
+        info "  $step. Destroy ipset sets $IPSET_V4 / $IPSET_V6"; step=$((step + 1))
+        info "  $step. Save nft table to $NFT_DROP_FILE"; step=$((step + 1))
+        info "  $step. Install systemd unit $SYSTEMD_UNIT_FILE"; step=$((step + 1))
+        info "  $step. Enable $SYSTEMD_UNIT (loads blacklist table on boot)"; step=$((step + 1))
+        info "  $step. Write migration state: finalized"
+        echo ""
+        local legacy
+        legacy=$(grep -rlw 'ipset' /etc/network/if-up.d/ /etc/network/if-pre-up.d/ 2>/dev/null || true)
+        if [ -n "$legacy" ]; then
+            warn "Found if-up.d scripts that reference ipset — review and disable before finalizing:"
+            echo "$legacy" | while read -r f; do warn "  $f"; done
+        fi
+        warn "Check for other legacy boot scripts (cron @reboot, rc.local, custom"
+        warn "scripts) that load ipset — they will fail after ipset is removed."
+        echo ""
+        if ! $DRY_RUN; then
+            info "To proceed:  sudo $0 --finalize --enable-service"
+            info "To preview:  sudo $0 --finalize --dry-run"
+        fi
+        exit 0
+    fi
 
     info "Finalizing: removing ipset+iptables..."
 
@@ -314,12 +378,50 @@ do_finalize() {
         info "  Destroyed ipset $IPSET_V6"
     fi
 
+    # Save blacklist table to a drop-in file
+    mkdir -p "$NFT_DROP_DIR"
+    echo '#!/usr/sbin/nft -f' > "$NFT_DROP_FILE"
+    nft list table inet "$NFT_TABLE" >> "$NFT_DROP_FILE"
+    info "  Saved blacklist table to $NFT_DROP_FILE"
+
+    # Install and enable dedicated systemd unit (safe with UFW/firewalld)
+    cat > "$SYSTEMD_UNIT_FILE" <<'UNIT'
+[Unit]
+Description=nftables blacklist table
+After=ufw.service firewalld.service network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/blacklist.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable "$SYSTEMD_UNIT"
+    info "  Installed and enabled $SYSTEMD_UNIT"
+
     write_state "finalized"
 
     echo ""
     info "=== Finalize complete ==="
     info "  ipset sets and iptables rules removed"
     info "  nft table 'inet $NFT_TABLE' is now the sole backend"
+    info "  $SYSTEMD_UNIT enabled — blacklist loads on boot"
+
+    # Scan for legacy scripts that reference ipset
+    local legacy
+    legacy=$(grep -rlw 'ipset' /etc/network/if-up.d/ /etc/network/if-pre-up.d/ 2>/dev/null || true)
+    if [ -n "$legacy" ]; then
+        echo ""
+        warn "Found if-up.d scripts that reference ipset — review and disable:"
+        echo "$legacy" | while read -r f; do warn "  $f"; done
+    fi
+    echo ""
+    warn "Check for other legacy boot scripts (cron @reboot, rc.local, custom"
+    warn "scripts) that load ipset — they will fail now that ipset sets are gone."
+    echo ""
     local backup_ipset
     backup_ipset=$(grep "^BACKUP_IPSET=" "$STATE_FILE" 2>/dev/null | cut -d= -f2)
     if [ -n "$backup_ipset" ] && [ -f "$backup_ipset" ]; then

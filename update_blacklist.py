@@ -1064,6 +1064,9 @@ def _apply_nft(args: argparse.Namespace, cfg: Config,
             except subprocess.CalledProcessError as e:
                 logger.warning("Dual-write ipset restore failed (non-fatal): %s",
                                e.stderr.decode("utf-8", "ignore").strip())
+        print("NOTE: nft migration pending on this host. "
+              "Run migrate-to-nftables.sh --finalize when ready.",
+              file=sys.stderr)
 
 
 def _apply_ipset(args: argparse.Namespace, cfg: Config,

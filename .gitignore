@@ -65,6 +65,9 @@ flycheck_*.el
 .DS_Store
 Thumbs.db
 
+# gstack
+.gstack/
+
 # Project specific
 *.dump
 *.backup

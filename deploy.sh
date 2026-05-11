@@ -102,6 +102,13 @@ install -m 0755 "$SCRIPT_NAME" "$INSTALL_DIR/$SCRIPT_NAME"
 sed -i "s/^__version__ = \"dev\"/__version__ = \"$VERSION\"/" "$INSTALL_DIR/$SCRIPT_NAME"
 echo -e "${GREEN}✓ Installed: $INSTALL_DIR/$SCRIPT_NAME${NC}"
 
+# Install drop-in wrapper (compatible with original update-blacklist.sh calling convention)
+WRAPPER_NAME="update-blacklist.sh"
+if [ -f "$WRAPPER_NAME" ]; then
+    install -m 0755 "$WRAPPER_NAME" "$INSTALL_DIR/$WRAPPER_NAME"
+    echo -e "${GREEN}✓ Installed: $INSTALL_DIR/$WRAPPER_NAME (drop-in wrapper)${NC}"
+fi
+
 # Install man page if it exists
 if [ -f "$MAN_PAGE" ]; then
     echo "Installing man page..."
