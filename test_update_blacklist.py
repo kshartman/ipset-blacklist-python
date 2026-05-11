@@ -12,10 +12,13 @@ from unittest import mock
 
 from update_blacklist import (
     Config,
+    DEFAULT_MAX_FAIL_RATIO,
     DEFAULT_NFT_SET_V4,
     DEFAULT_NFT_SET_V6,
     DEFAULT_NFT_TABLE,
     NFT_CHUNK_SIZE,
+    _conf_int,
+    _conf_str,
     __version__,
     analyze_dumpfile,
     apply_nft_batch,
@@ -33,6 +36,7 @@ from update_blacklist import (
     parse_entry,
     parse_nft_dump,
     setup_nft_table_script,
+    validate_config,
     write_nft_batch,
     write_restore,
 )
@@ -574,13 +578,15 @@ class TestWriteNftBatch(unittest.TestCase):
                                ["1.2.3.4", "10.0.0.0/8"], [], dry_run=True)
         self.assertIn("flush set inet blacklist v4", text)
         self.assertIn("add element inet blacklist v4 { 1.2.3.4, 10.0.0.0/8 }", text)
-        self.assertNotIn("v6", text)
+        self.assertIn("flush set inet blacklist v6", text)
+        self.assertNotIn("add element inet blacklist v6", text)
 
     def test_v6_only(self):
         text = write_nft_batch(self._cfg(), [], ["::1"], dry_run=True)
         self.assertIn("flush set inet blacklist v6", text)
         self.assertIn("add element inet blacklist v6 { ::1 }", text)
-        self.assertNotIn("v4", text)
+        self.assertIn("flush set inet blacklist v4", text)
+        self.assertNotIn("add element inet blacklist v4", text)
 
     def test_both_families(self):
         text = write_nft_batch(self._cfg(), ["1.2.3.4"], ["::1"], dry_run=True)
@@ -589,7 +595,9 @@ class TestWriteNftBatch(unittest.TestCase):
 
     def test_empty(self):
         text = write_nft_batch(self._cfg(), [], [], dry_run=True)
-        self.assertEqual(text, "")
+        self.assertIn("flush set inet blacklist v4", text)
+        self.assertIn("flush set inet blacklist v6", text)
+        self.assertNotIn("add element", text)
 
     def test_chunking(self):
         entries = [f"10.0.{i // 256}.{i % 256}" for i in range(NFT_CHUNK_SIZE + 5)]
@@ -1091,6 +1099,63 @@ class TestEnsureRule(unittest.TestCase):
                 ["iptables", "-C", "INPUT", "-j", "DROP"],
                 ["iptables", "-I", "INPUT", "-j", "DROP"])
         self.assertIn("Failed to insert rule", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# validate_config
+# ---------------------------------------------------------------------------
+class TestValidateConfig(unittest.TestCase):
+
+    def test_http_source_warns(self):
+        cfg = Config(blacklists=["http://example.com/list.txt"])
+        warnings = validate_config(cfg)
+        self.assertTrue(any("Insecure HTTP" in w for w in warnings))
+
+    def test_https_source_no_warn(self):
+        cfg = Config(blacklists=["https://example.com/list.txt"])
+        warnings = validate_config(cfg)
+        self.assertFalse(any("Insecure HTTP" in w for w in warnings))
+
+    def test_invalid_nft_table_warns(self):
+        cfg = Config(nft_table="drop; flush ruleset")
+        warnings = validate_config(cfg)
+        self.assertTrue(any("nft_table" in w for w in warnings))
+
+    def test_valid_nft_table_no_warn(self):
+        cfg = Config(nft_table="blacklist")
+        warnings = validate_config(cfg)
+        self.assertFalse(any("nft_table" in w for w in warnings))
+
+    def test_invalid_nft_set_warns(self):
+        cfg = Config(nft_set_v4="v4; drop")
+        warnings = validate_config(cfg)
+        self.assertTrue(any("nft_set_v4" in w for w in warnings))
+
+
+# ---------------------------------------------------------------------------
+# Config parsing — inline comments and let prefix
+# ---------------------------------------------------------------------------
+class TestConfParsing(unittest.TestCase):
+
+    def test_inline_comment_stripped(self):
+        text = 'IPSET_BLACKLIST_NAME=blacklist # change if collision\n'
+        result = _conf_str(text, "IPSET_BLACKLIST_NAME", r'[A-Za-z0-9_-]+')
+        self.assertEqual(result, "blacklist")
+
+    def test_let_prefix_int(self):
+        text = 'let IPTABLES_IPSET_RULE_NUMBER=1\n'
+        result = _conf_int(text, "IPTABLES_IPSET_RULE_NUMBER")
+        self.assertEqual(result, 1)
+
+    def test_let_prefix_with_comment(self):
+        text = 'let IPTABLES_IPSET_RULE_NUMBER=3 # position\n'
+        result = _conf_int(text, "IPTABLES_IPSET_RULE_NUMBER")
+        self.assertEqual(result, 3)
+
+    def test_no_let_still_works(self):
+        text = 'MAXELEM=131072\n'
+        result = _conf_int(text, "MAXELEM")
+        self.assertEqual(result, 131072)
 
 
 # ---------------------------------------------------------------------------

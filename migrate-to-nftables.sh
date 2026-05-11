@@ -361,30 +361,14 @@ do_finalize() {
         exit 0
     fi
 
-    info "Finalizing: removing ipset+iptables..."
+    info "Finalizing..."
 
-    # Remove iptables rules (ignore errors — rules may already be gone)
-    iptables -D INPUT -m set --match-set "$IPSET_V4" src -j DROP 2>/dev/null || true
-    ip6tables -D INPUT -m set --match-set "$IPSET_V6" src -j DROP 2>/dev/null || true
-    info "  Removed iptables DROP rules"
-
-    # Destroy ipset sets
-    if ipset_set_exists "$IPSET_V4"; then
-        ipset destroy "$IPSET_V4"
-        info "  Destroyed ipset $IPSET_V4"
-    fi
-    if ipset_set_exists "$IPSET_V6"; then
-        ipset destroy "$IPSET_V6"
-        info "  Destroyed ipset $IPSET_V6"
-    fi
-
-    # Save blacklist table to a drop-in file
+    # Step 1: Persist nft BEFORE removing legacy (fail-safe ordering)
     mkdir -p "$NFT_DROP_DIR"
     echo '#!/usr/sbin/nft -f' > "$NFT_DROP_FILE"
     nft list table inet "$NFT_TABLE" >> "$NFT_DROP_FILE"
     info "  Saved blacklist table to $NFT_DROP_FILE"
 
-    # Install and enable dedicated systemd unit (safe with UFW/firewalld)
     cat > "$SYSTEMD_UNIT_FILE" <<'UNIT'
 [Unit]
 Description=nftables blacklist table
@@ -401,6 +385,20 @@ UNIT
     systemctl daemon-reload
     systemctl enable "$SYSTEMD_UNIT"
     info "  Installed and enabled $SYSTEMD_UNIT"
+
+    # Step 2: Now safe to remove legacy ipset+iptables
+    iptables -D INPUT -m set --match-set "$IPSET_V4" src -j DROP 2>/dev/null || true
+    ip6tables -D INPUT -m set --match-set "$IPSET_V6" src -j DROP 2>/dev/null || true
+    info "  Removed iptables DROP rules"
+
+    if ipset_set_exists "$IPSET_V4"; then
+        ipset destroy "$IPSET_V4"
+        info "  Destroyed ipset $IPSET_V4"
+    fi
+    if ipset_set_exists "$IPSET_V6"; then
+        ipset destroy "$IPSET_V6"
+        info "  Destroyed ipset $IPSET_V6"
+    fi
 
     write_state "finalized"
 

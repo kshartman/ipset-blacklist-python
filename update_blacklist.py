@@ -48,6 +48,8 @@ DEFAULT_RETRY_DELAYS = [1, 4]  # Exponential backoff in seconds
 DEFAULT_NFT_TABLE   = "blacklist"
 DEFAULT_NFT_SET_V4  = "v4"
 DEFAULT_NFT_SET_V6  = "v6"
+DEFAULT_MAX_FAIL_RATIO = 0.5  # Abort if >50% of sources fail
+_NFT_ID_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_-]{0,63}$')
 
 
 @dataclasses.dataclass
@@ -360,10 +362,18 @@ def validate_config(cfg: Config) -> List[str]:
         warnings.append(f"TIMEOUT may be too short: {cfg.timeout}s")
     if not cfg.blacklists:
         warnings.append("No blacklist sources configured")
+    for src in cfg.blacklists:
+        if src.startswith("http://"):
+            warnings.append(f"Insecure HTTP source (use HTTPS): {src}")
     if not re.match(r'^[A-Za-z0-9:_-]+$', cfg.set_v4):
         warnings.append(f"Invalid set_v4: {cfg.set_v4}")
     if not re.match(r'^[A-Za-z0-9:_-]+$', cfg.set_v6):
         warnings.append(f"Invalid set_v6: {cfg.set_v6}")
+    for name, val in [("nft_table", cfg.nft_table),
+                      ("nft_set_v4", cfg.nft_set_v4),
+                      ("nft_set_v6", cfg.nft_set_v6)]:
+        if not _NFT_ID_RE.match(val):
+            warnings.append(f"Invalid {name} (must be alphanumeric/underscore/hyphen): {val}")
     return warnings
 
 # ---------------- nft backend detection ----------------
@@ -429,13 +439,13 @@ _ID_PAT = r'[A-Za-z0-9:_-]+'
 
 def _conf_str(text: str, key: str, pattern: str = r'[^\s#]+') -> Optional[str]:
     """Extract a string config value matching key=pattern from bash-style config."""
-    m = re.search(rf'^\s*{key}\s*=\s*({pattern})\s*$', text, re.M)
+    m = re.search(rf'^\s*(?:let\s+)?{key}\s*=\s*({pattern})(?:\s+#.*)?$', text, re.M)
     return m.group(1) if m else None
 
 
 def _conf_int(text: str, key: str) -> Optional[int]:
     """Extract an integer config value from bash-style config."""
-    m = re.search(rf'^\s*{key}\s*=\s*([0-9]+)\s*$', text, re.M)
+    m = re.search(rf'^\s*(?:let\s+)?{key}\s*=\s*([0-9]+)(?:\s+#.*)?$', text, re.M)
     return int(m.group(1)) if m else None
 
 
@@ -521,7 +531,7 @@ def _restore_lines(families: List[Tuple], hashsize: int, maxelem: int,
     """Generate ipset restore command lines for each address family."""
     lines: List[str] = []
     for setname, tmpname, hashtype, family, entries in families:
-        if not entries:
+        if not entries and not tmp:
             continue
         if tmp:
             lines.append(f"create {tmpname} {hashtype} family {family}"
@@ -577,10 +587,8 @@ def write_nft_batch(cfg: Config, v4: List[str], v6: List[str],
             elems = ", ".join(chunk)
             lines.append(f"add element inet {table} {set_name} {{ {elems} }}")
 
-    if v4:
-        _add_elements(cfg.nft_set_v4, v4)
-    if v6:
-        _add_elements(cfg.nft_set_v6, v6)
+    _add_elements(cfg.nft_set_v4, v4)
+    _add_elements(cfg.nft_set_v6, v6)
 
     text = "\n".join(lines) + ("\n" if lines else "")
     if dry_run:
@@ -775,6 +783,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--nft-table", default=None, help="nft table name.")
     ap.add_argument("--nft-set-v4", default=None, help="nft v4 set name.")
     ap.add_argument("--nft-set-v6", default=None, help="nft v6 set name.")
+    ap.add_argument("--allow-partial", action="store_true",
+                    help="Continue even if >50%% of sources fail to fetch.")
     ap.add_argument("--import-ipset", metavar="FILE",
                     help="Convert ipset dump to nft batch format.")
     ap.add_argument("--export-ipset", metavar="FILE",
@@ -899,12 +909,14 @@ def _cli_overrides(args: argparse.Namespace, cfg: Config) -> Dict[str, object]:
         ov["iptables_pos"] = args.iptables_pos
     if args.extra_source:
         ov["blacklists"] = cfg.blacklists + list(args.extra_source)
-    if args.nft_table:
-        ov["nft_table"] = args.nft_table
-    if args.nft_set_v4:
-        ov["nft_set_v4"] = args.nft_set_v4
-    if args.nft_set_v6:
-        ov["nft_set_v6"] = args.nft_set_v6
+    for flag, attr in [("nft_table", "nft_table"), ("nft_set_v4", "nft_set_v4"),
+                        ("nft_set_v6", "nft_set_v6")]:
+        val = getattr(args, flag, None)
+        if val:
+            if not _NFT_ID_RE.match(val):
+                logger.error("Invalid --%s: must match [A-Za-z][A-Za-z0-9_-]{0,63}", flag.replace("_", "-"))
+                sys.exit(2)
+            ov[attr] = val
     if args.backend:
         ov["backend"] = args.backend
     return ov
@@ -951,8 +963,12 @@ def _fetch_and_optimize(args: argparse.Namespace,
     sources = cfg.blacklists
     total = len(sources) or 1
     next_tick = 0
+    fail_count = 0
     for i, src in enumerate(sources, 1):
         text = fetch_source(src, timeout=cfg.timeout)
+        if not text:
+            fail_count += 1
+            logger.warning("Failed to fetch source: %s", src)
         for ln in text.splitlines():
             n = parse_entry(ln)
             if n:
@@ -962,6 +978,12 @@ def _fetch_and_optimize(args: argparse.Namespace,
                                      next_tick, args.progress_interval)
     if args.progress and sources:
         sys.stderr.write("\n")
+
+    if sources and fail_count > 0:
+        logger.warning("Source fetch failures: %d/%d", fail_count, len(sources))
+        if not args.allow_partial and fail_count / len(sources) > DEFAULT_MAX_FAIL_RATIO:
+            logger.error("Aborting: >50%% of sources failed. Use --allow-partial to override.")
+            sys.exit(3)
 
     logger.info("Parsed entries: %d", len(raw_networks))
 
