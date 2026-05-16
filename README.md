@@ -44,6 +44,7 @@ The Python script is designed as a **drop-in replacement** for the original shel
 - Reads the **same configuration file** format
 - Produces **nft batch files** (or ipset restore with `--backend ipset`)
 - Supports all original config variables (BLACKLISTS, MAXELEM, HASHSIZE, etc.)
+- `MAXELEM` is enforced as a hard cap — if entries exceed it after dedup, the broadest CIDRs are kept (most coverage per entry)
 - Adds `--force` flag equivalent to `FORCE=yes` in original
 - Includes `update-blacklist.sh` wrapper for cron jobs that call the original script name
 
@@ -169,7 +170,7 @@ MAILTO=root
 - **800k IPs**: ~280 MB
 - **1.6M IPs**: ~560 MB
 
-Suitable for any system with 1GB+ RAM.
+Suitable for any system with 1GB+ RAM. For memory-constrained hosts, set `MAXELEM` in your config to cap total entries (e.g., `MAXELEM=10000` for a 512MB host). When the cap is hit, broadest CIDRs are kept for maximum coverage per entry.
 
 ## Performance
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run all tests (150 Python + 22 BATS)
+# Run all tests (153 Python + 22 BATS)
 python3 -m unittest test_update_blacklist -v
 bats test_migrate.bats
 
@@ -51,8 +51,9 @@ Two operating modes:
 2. **Fetch** (`fetch_source`) — HTTP/HTTPS with 3-attempt exponential backoff; local `file://` paths
 3. **Parse** (`parse_entry` / `parse_addr_token`) — handles raw IPs, CIDRs, `add <set> <addr>` lines; normalizes hosts to /32 or /128
 4. **Dedup** (`optimize_fast`) — O(N·P) algorithm: for each prefix length P (sorted shortest to longest), removes any network covered by a broader range already in the set; P ≤ 32 for v4, ≤ 128 for v6. Also filters private IPs via `is_private_ip`.
-5. **Write** (`write_nft_batch` or `write_restore`) — emits nft batch (default) or ipset restore format
-6. **Apply** (`--apply`) — nft: `flush set` + chunked `add element` via `nft -f`; ipset (legacy): `-tmp` set, `ipset restore`, `ipset swap`
+5. **MAXELEM cap** — if entries exceed `MAXELEM` after dedup, keeps broadest CIDRs (lowest prefix length = most coverage per entry) and drops narrowest. Prevents OOM on memory-constrained hosts.
+6. **Write** (`write_nft_batch` or `write_restore`) — emits nft batch (default) or ipset restore format
+7. **Apply** (`--apply`) — nft: `flush set` + chunked `add element` via `nft -f`; ipset (legacy): `-tmp` set, `ipset restore`, `ipset swap`
 
 ### Public API (imported by tests)
 
