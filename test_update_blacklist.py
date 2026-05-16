@@ -908,6 +908,65 @@ class TestMainNftIntegration(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# MAXELEM cap
+# ---------------------------------------------------------------------------
+class TestMaxelemCap(unittest.TestCase):
+    """MAXELEM should cap total entries for both ipset and nft backends."""
+
+    def _run_fetch_and_optimize(self, maxelem: int,
+                                entries: int = 20) -> tuple:
+        """Build a conf with N entries and run _fetch_and_optimize with given maxelem."""
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".list", delete=False)
+        for i in range(entries):
+            src.write(f"1.{i // 256}.{i % 256}.0/24\n")
+        src.close()
+        conf = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
+        conf.write(f'BLACKLISTS=(\n"{src.name}"\n)\nMAXELEM={maxelem}\n')
+        conf.close()
+        import sys
+        from update_blacklist import _fetch_and_optimize, _resolve_config
+        with mock.patch.object(sys, "argv",
+                               ["prog", "--conf", conf.name, "--quiet", "--ipv4-only"]):
+            from update_blacklist import _build_parser
+            args = _build_parser().parse_args()
+            cfg = _resolve_config(args)
+        return _fetch_and_optimize(args, cfg)
+
+    def test_no_cap_when_under_limit(self):
+        v4, _, _ = self._run_fetch_and_optimize(maxelem=100, entries=20)
+        self.assertEqual(len(v4), 20)
+
+    def test_cap_truncates_to_maxelem(self):
+        v4, _, _ = self._run_fetch_and_optimize(maxelem=10, entries=20)
+        self.assertEqual(len(v4), 10)
+
+    def test_cap_keeps_broadest_cidrs(self):
+        """Broader prefixes (lower prefix length) should survive the cap."""
+        src = tempfile.NamedTemporaryFile(mode="w", suffix=".list", delete=False)
+        src.write("10.0.0.0/8\n")
+        src.write("172.20.0.0/16\n")
+        for i in range(20):
+            src.write(f"5.5.5.{i}/32\n")
+        src.close()
+        conf = tempfile.NamedTemporaryFile(mode="w", suffix=".conf", delete=False)
+        conf.write(f'BLACKLISTS=(\n"{src.name}"\n)\nMAXELEM=5\n')
+        conf.close()
+        import sys
+        from update_blacklist import _fetch_and_optimize, _resolve_config, _build_parser
+        with mock.patch.object(sys, "argv",
+                               ["prog", "--conf", conf.name, "--quiet",
+                                "--ipv4-only", "--no-filter-private"]):
+            args = _build_parser().parse_args()
+            cfg = _resolve_config(args)
+        v4, _, _ = _fetch_and_optimize(args, cfg)
+        self.assertIsNotNone(v4)
+        assert v4 is not None
+        self.assertEqual(len(v4), 5)
+        self.assertIn("10.0.0.0/8", v4)
+        self.assertIn("172.20.0.0/16", v4)
+
+
+# ---------------------------------------------------------------------------
 # import / export
 # ---------------------------------------------------------------------------
 class TestImportExport(unittest.TestCase):

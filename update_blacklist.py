@@ -1000,6 +1000,15 @@ def _fetch_and_optimize(args: argparse.Namespace,
         filter_private=not args.no_filter_private)
 
     kept_t.sort(key=sort_key_tuple)
+
+    if len(kept_t) > cfg.maxelem:
+        original = len(kept_t)
+        kept_t.sort(key=lambda t: (t[2], 0 if t[0] == 4 else 1, t[1]))
+        kept_t = kept_t[:cfg.maxelem]
+        kept_t.sort(key=sort_key_tuple)
+        logger.warning("MAXELEM cap (%d): dropped %d narrowest entries (%d → %d)",
+                       cfg.maxelem, original - cfg.maxelem, original, cfg.maxelem)
+
     v4, v6 = _split_families(kept_t, args.collapse)
     v4_out: Optional[List[str]] = v4
     v6_out: Optional[List[str]] = v6
